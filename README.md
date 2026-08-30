@@ -1,6 +1,6 @@
 # My AI Team
 
-My AI Team is a local multi-agent workspace for running OpenAI, DeepSeek, and OpenAI-compatible providers as configurable agents. It provides Direct Workspace, controlled Team Discussion, persistent Live Chat, an isolated Builder Workspace, and a Studio control center.
+My AI Team is a local AI debate workspace where selected models defend assigned positions, challenge one another, and receive an independent scored verdict. Direct Workspace, Live Chat, Builder, retrieval, and Studio support that central debate experience.
 
 ## Quick start
 
@@ -18,11 +18,16 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 
 ## Included features
 
+- Structured debates with opening statements, cross-examination, rebuttals, closing positions, and an independent jury.
+- Per-debater provider, model, identity, and position selection with strict ownership of previous statements.
+- Adversarial, decision, and Socratic formats; live moderator pause/intervention; chronological and side-by-side views.
+- Jury scoring for reasoning, evidence, responsiveness, and consistency, plus common ground, disagreements, unresolved questions, and a verdict.
+- Saved, replayable, exportable debates with evidence attachments and a conservative pre-run cost estimate.
 - Visual workflow builder with create, rename, reorder, remove, and execution-mode controls.
 - Agent editor with validated provider-specific model selectors, roles, instructions, peer visibility, and sentence limits.
-- True incremental streaming and Stop controls in Direct Workspace, Team Discussion, and Live Chat.
+- True incremental streaming and Stop controls in Debate, Direct Workspace, and Live Chat.
 - Workflow range controls: start at a step, stop after a step, or skip selected steps; these also support rerunning or continuing a subset of a workflow.
-- Named Live Chat conversations and saved Direct/Discussion runs in SQLite.
+- Named Live Chat conversations and saved Debate/Direct runs in SQLite.
 - Reusable PDF, DOCX, TXT, Markdown, CSV, and JSON documents with bounded shared-context injection.
 - Markdown, PDF, and JSON exports for saved runs.
 - Model-aware cost estimates, provider-reported token accounting, configurable warnings, and a daily budget.
@@ -49,7 +54,7 @@ Studio contains eight tabs:
 
 1. **Agents** — create agents and assign a provider, model, role, and response contract.
 2. **Workflows** — build ordered agent pipelines and choose Respond, Critique, Questions, Audit, or Synthesize for each step.
-3. **Knowledge** — save reusable documents. Select them in Direct Workspace or Team Discussion when their contents should be shared with the team.
+3. **Knowledge** — save reusable documents. Select them in Debate or Direct Workspace when their contents should be shared with the team.
 4. **Evaluations** — create repeatable test cases and run them against a workflow in the background.
 5. **Graph** — inspect extracted entities and relationships or synchronize them to Neo4j.
 6. **Integrations** — configure provider plugins, create isolated users, connect n8n, and back up or restore the app.
@@ -98,10 +103,10 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Tests never call paid APIs. They cover the interfaces, CRUD, execution, validation, conversations, streaming, retrieval and citations, graph extraction, evaluations, durable jobs, prompt versions, plugins, backups, Builder worktree isolation and merge behavior, settings, run history, costs, and exports.
+Tests never call paid APIs. They cover the structured debate contract, participant validation, verdict persistence, interfaces, CRUD, streaming, retrieval and citations, graph extraction, evaluations, durable jobs, plugins, backups, Builder isolation and merge behavior, settings, costs, and exports.
 
 ## Architecture and extension points
 
 See [ARCHITECTURE.md](ARCHITECTURE.md). FastAPI owns validation and orchestration, SQLite stores local state, and small provider adapters isolate external APIs.
 
-FastAPI API documentation is available at <http://127.0.0.1:8000/docs>. Useful integration endpoints include `POST /api/workflows/{id}/run`, `POST /api/workflows/{id}/stream`, `POST /api/discuss/stream`, and `POST /api/chat/stream`.
+FastAPI API documentation is available at <http://127.0.0.1:8000/docs>. Useful integration endpoints include `POST /api/debate/stream`, `POST /api/debate/{run_id}/control`, `POST /api/workflows/{id}/stream`, and `POST /api/chat/stream`.

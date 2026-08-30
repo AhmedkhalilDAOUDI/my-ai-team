@@ -42,6 +42,7 @@ platform = PlatformStore(store)
 builder = BuilderWorkspace(store, BASE_DIR.parent)
 
 RUNTIME_SETTING_KEYS = {"max_output_tokens", "cost_warning_usd", "daily_budget_usd", "request_timeout_seconds", "enable_embeddings"}
+DEBATE_CONTROLS: dict[int, dict] = {}
 
 
 def runtime_settings():
@@ -94,6 +95,7 @@ def model_catalog(settings):
 
 def validate_model(provider: str, model: str | None, settings) -> str:
     catalog, defaults = model_catalog(settings)
+    if provider not in catalog: raise HTTPException(status_code=422, detail=f"Unknown or disabled provider: {provider}")
     selected = model or defaults[provider]
     if selected not in {item["id"] for item in catalog[provider]}:
         raise HTTPException(status_code=422, detail=f"{selected} is not an available {provider} model.")
@@ -200,6 +202,33 @@ class DiscussionRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=20_000)
     rounds: int = Field(default=1, ge=1, le=2)
     document_ids: list[int] = Field(default_factory=list, max_length=50)
+
+
+class DebateParticipantInput(BaseModel):
+    id: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    name: str = Field(min_length=1, max_length=80)
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=100)
+    position: str = Field(min_length=2, max_length=500)
+
+
+class DebateJuryInput(BaseModel):
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=100)
+
+
+class DebateRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=20_000)
+    participants: list[DebateParticipantInput] = Field(min_length=2, max_length=4)
+    jury: DebateJuryInput
+    debate_format: Literal["adversarial", "decision", "socratic"] = "adversarial"
+    intervention: str = Field(default="", max_length=5000)
+    document_ids: list[int] = Field(default_factory=list, max_length=50)
+
+
+class DebateControlInput(BaseModel):
+    action: Literal["pause", "resume", "intervene"]
+    message: str = Field(default="", max_length=5000)
 
 
 class ChatRequest(BaseModel):
@@ -346,6 +375,11 @@ class UsageEstimateInput(BaseModel):
 
 @app.get("/", include_in_schema=False)
 async def home():
+    return FileResponse(BASE_DIR / "static" / "discussion.html")
+
+
+@app.get("/workspace", include_in_schema=False)
+async def workspace_page():
     return FileResponse(BASE_DIR / "static" / "index.html")
 
 
@@ -470,6 +504,58 @@ async def stream_discussion(request: DiscussionRequest):
                 reason = "Stopped by user" if store.run_cancelled(run["id"]) else "Connection closed"
                 store.finish_run(run["id"], "cancelled", error=reason)
     return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/debate/stream")
+async def stream_debate(request: DebateRequest):
+    ensure_budget_available()
+    ids=[participant.id for participant in request.participants]
+    if len(set(ids))!=len(ids):raise HTTPException(status_code=422,detail="Participant IDs must be unique")
+    settings=runtime_settings();participants=[]
+    for item in request.participants:
+        participant=item.model_dump();participant["model"]=validate_model(participant["provider"],participant["model"],settings);participants.append(participant)
+    jury=request.jury.model_dump();jury["model"]=validate_model(jury["provider"],jury["model"],settings)
+    question=request.question.strip();context=await retrieval_context(question,request.document_ids) if request.document_ids else ""
+    if context:question=f"{question}\n\nEVIDENCE AVAILABLE TO ALL PARTICIPANTS:\n{context}"
+    run=store.create_run("debate",request.question.strip())
+    DEBATE_CONTROLS[run["id"]]={"paused":False,"intervention":request.intervention.strip()}
+    async def events():
+        completed=False;yield json.dumps({"type":"meta","run_id":run["id"],"participants":participants,"jury":jury})+"\n"
+        try:
+            async def moderator_context():
+                while DEBATE_CONTROLS.get(run["id"],{}).get("paused"):
+                    if store.run_cancelled(run["id"]):break
+                    await asyncio.sleep(.25)
+                return DEBATE_CONTROLS.get(run["id"],{}).get("intervention","")
+            async for event in ThesisTeam(settings).stream_debate(question,participants,jury,request.debate_format,request.intervention.strip(),moderator_context):
+                if store.run_cancelled(run["id"]):
+                    store.finish_run(run["id"],"cancelled",error="Stopped by user");yield json.dumps({"type":"cancelled"})+"\n";return
+                if event["type"]=="turn_done":record_result_usage(event["turn"])
+                if event["type"]=="report":record_result_usage(event["report"].get("jury",{}))
+                if event["type"]=="complete":
+                    payload={**event,"participants":participants,"jury":jury,"debate_format":request.debate_format,"run_id":run["id"]};store.finish_run(run["id"],"completed",payload);completed=True
+                yield json.dumps(event)+"\n"
+        except asyncio.CancelledError:raise
+        except Exception as exc:
+            store.finish_run(run["id"],"failed",error=str(exc));yield json.dumps({"type":"error","error":str(exc)})+"\n"
+        finally:
+            if not completed and not store.run_cancelled(run["id"]):store.finish_run(run["id"],"cancelled",error="Connection closed")
+            DEBATE_CONTROLS.pop(run["id"],None)
+    return StreamingResponse(events(),media_type="application/x-ndjson",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+@app.post("/api/debate/{run_id}/control")
+async def control_debate(run_id: int,data: DebateControlInput):
+    run=store.run_detail(run_id)
+    if not run or run["interface"]!="debate":raise HTTPException(status_code=404,detail="Active debate not found")
+    control=DEBATE_CONTROLS.get(run_id)
+    if control is None:raise HTTPException(status_code=409,detail="Debate is no longer active")
+    if data.action=="pause":control["paused"]=True
+    elif data.action=="resume":control["paused"]=False
+    elif data.action=="intervene":
+        if not data.message.strip():raise HTTPException(status_code=422,detail="Intervention message is required")
+        control["intervention"]=(control.get("intervention","")+"\n"+data.message.strip()).strip()
+    return {"status":data.action,"paused":control["paused"],"intervention":control["intervention"]}
 
 
 @app.post("/api/chat")
@@ -867,6 +953,11 @@ def run_markdown(run: dict) -> str:
         lines.extend([f"## {turn.get('agent_name', turn.get('provider', 'Agent'))}", "", turn.get("text") or turn.get("error", ""), ""])
     synthesis = result.get("synthesis", {})
     if synthesis: lines.extend(["## Final synthesis", "", synthesis.get("text") or synthesis.get("error", "")])
+    report = result.get("report", {})
+    if report:
+        lines.extend(["## Jury verdict", "", report.get("verdict", ""), "", "## Strongest argument", "", report.get("strongest_argument", "")])
+        if report.get("consensus"): lines.extend(["", "## Common ground", "", *[f"- {item}" for item in report["consensus"]]])
+        if report.get("unresolved_questions"): lines.extend(["", "## Unresolved questions", "", *[f"- {item}" for item in report["unresolved_questions"]]])
     return "\n".join(lines)
 
 

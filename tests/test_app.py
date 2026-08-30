@@ -10,11 +10,11 @@ from app.orchestrator import ProviderResult, ThesisTeam
 client=TestClient(app)
 
 def test_pages_and_health():
-    assert all(client.get(path).status_code==200 for path in ("/","/discussion","/chat","/builder","/studio"))
+    assert all(client.get(path).status_code==200 for path in ("/","/workspace","/discussion","/chat","/builder","/studio"))
     assert set(client.get("/api/health").json()["providers"])=={"openai","deepseek","jury","auditor"}
 
 def test_every_interface_keeps_its_browser_state():
-    for path in ("/", "/discussion", "/chat", "/studio"):
+    for path in ("/", "/workspace", "/discussion", "/chat", "/builder", "/studio"):
         assert '/static/page-state.js' in client.get(path).text
     chat_script=client.get('/static/chat.js').text
     assert 'my-ai-team:chat-runtime' in chat_script
@@ -316,3 +316,48 @@ def test_builder_workspace_isolated_branch_paths_and_merge(tmp_path):
     workspace.update(session['id'],status='ready')
     merged=workspace.merge(session['id'],1)
     assert merged['status']=='merged' and (repository/'README.md').read_text()=='updated\n'
+
+def test_debate_stream_contract_and_persistence(monkeypatch):
+    async def fake_debate(self,question,participants,jury,debate_format,intervention='',moderator_context=None):
+        for stage in ('opening','cross_examination','rebuttal','closing'):
+            for participant in participants:
+                yield {'type':'turn_start','stage':stage,'stage_index':1,'participant':participant}
+                yield {'type':'turn_delta','stage':stage,'participant_id':participant['id'],'text':f'{stage} argument'}
+                turn={'stage':stage,'stage_index':1,'participant_id':participant['id'],'name':participant['name'],'position':participant['position'],'provider':participant['provider'],'model':participant['model'],'status':'ok','text':f'{stage} argument','error':'','usage_provider':participant['provider'],'input_tokens':1,'output_tokens':1}
+                yield {'type':'turn_done','turn':turn}
+        report={'verdict':'Position A wins','winner_id':'a','strongest_argument':'A','consensus':['Shared fact'],'disagreements':[{'claim':'Choice','positions':'A vs B'}],'unresolved_questions':['Cost?'],'scores':[],'jury':{**jury,'usage_provider':jury['provider'],'input_tokens':1,'output_tokens':1}}
+        yield {'type':'jury_start','jury':jury};yield {'type':'report','report':report};yield {'type':'complete','turns':[],'report':report,'request_count':9}
+    monkeypatch.setattr(ThesisTeam,'stream_debate',fake_debate)
+    payload={'question':'Which approach is better?','participants':[{'id':'a','name':'Advocate','provider':'openai','model':'gpt-5.6-sol','position':'Position A'},{'id':'b','name':'Skeptic','provider':'deepseek','model':'deepseek-v4-pro','position':'Position B'}],'jury':{'provider':'openai','model':'gpt-5.6-sol'},'debate_format':'adversarial','document_ids':[]}
+    response=client.post('/api/debate/stream',json=payload)
+    assert response.status_code==200 and 'cross_examination' in response.text and 'Position A wins' in response.text
+    meta=next(__import__('json').loads(line) for line in response.text.splitlines() if '"type": "meta"' in line)
+    run=client.get(f"/api/runs/{meta['run_id']}").json()
+    assert run['interface']=='debate' and run['result']['report']['winner_id']=='a'
+    store.delete_run(meta['run_id'])
+
+def test_debate_rejects_duplicate_participant_ids():
+    participant={'id':'same','name':'One','provider':'openai','model':'gpt-5.6-sol','position':'A'}
+    payload={'question':'Which?','participants':[participant,{**participant,'name':'Two','position':'B'}],'jury':{'provider':'openai','model':'gpt-5.6-sol'},'debate_format':'decision'}
+    assert client.post('/api/debate/stream',json=payload).status_code==422
+
+def test_debate_preserves_speaker_identity_and_structured_stages(monkeypatch):
+    prompts=[]
+    class FakeProvider:
+        model='fake-model';provider_id='fake';last_usage={}
+        async def stream(self,prompt,system_prompt):
+            prompts.append(prompt)
+            name='Alpha' if 'You are Alpha.' in prompt else 'Beta'
+            yield {'type':'delta','text':f'{name} claim'}
+            yield {'type':'usage','input_tokens':1,'output_tokens':1}
+        async def ask(self,prompt,system_prompt):
+            return '{"verdict":"Tie","winner_id":"tie","strongest_argument":"Both","consensus":[],"disagreements":[],"unresolved_questions":[],"scores":[]}'
+    team=ThesisTeam(Settings(openai_api_key='x',deepseek_api_key='x'))
+    fake=FakeProvider();monkeypatch.setattr(team,'_provider_for_agent',lambda agent:fake)
+    debaters=[{'id':'alpha','name':'Alpha','provider':'openai','model':'gpt-5.6-sol','position':'A'},{'id':'beta','name':'Beta','provider':'deepseek','model':'deepseek-v4-pro','position':'B'}]
+    async def collect():return [event async for event in team.stream_debate('Question',debaters,{'provider':'openai','model':'gpt-5.6-sol'},'adversarial')]
+    events=asyncio.run(collect());complete=events[-1]
+    assert complete['type']=='complete' and complete['request_count']==9
+    assert {turn['stage'] for turn in complete['turns']}=={'opening','cross_examination','rebuttal','closing'}
+    assert 'YOUR OWN PREVIOUS STATEMENTS' in prompts[2] and 'opening: Alpha claim' in prompts[2]
+    assert 'OPPONENT STATEMENTS' in prompts[2] and 'Beta (B) — opening: Beta claim' in prompts[2]

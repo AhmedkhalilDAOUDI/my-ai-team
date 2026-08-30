@@ -1,4 +1,6 @@
 import asyncio
+import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from .config import Settings
@@ -223,6 +225,55 @@ Advance the work without unnecessary recap."""
         if successful: request_count += 1
         yield {"type": "synthesis", "result": vars(synthesis)}
         yield {"type": "complete", "turns": turns, "synthesis": vars(synthesis), "request_count": request_count}
+
+    async def stream_debate(self, question: str, participants: list[dict], jury: dict, debate_format: str, intervention: str = "", moderator_context=None) -> AsyncIterator[dict]:
+        turns, request_count = [], 0
+        stages = ["opening", "cross_examination", "rebuttal", "closing"]
+        format_rules = {
+            "adversarial": "Challenge opposing claims directly and concede only when the argument warrants it.",
+            "decision": "Compare alternatives against feasibility, risk, evidence, and the user's desired outcome.",
+            "socratic": "Expose assumptions through precise questions and reason from the answers.",
+        }
+        stage_rules = {
+            "opening": "Present your strongest position independently: thesis, reasoning, and the evidence required to support it.",
+            "cross_examination": "Ask one precise question of the named opponent that targets their weakest consequential claim. Do not answer the question yourself.",
+            "rebuttal": "Answer questions directed at you, challenge the strongest opposing claim, and explicitly identify any point you now concede.",
+            "closing": "State your final recommendation, what changed in your position, and the single most important remaining uncertainty.",
+        }
+        for stage_index, stage in enumerate(stages, start=1):
+            live_intervention = await moderator_context() if moderator_context else intervention
+            snapshot=list(turns)
+            for index, participant in enumerate(participants):
+                own="\n\n".join(f"{t['stage']}: {t['text']}" for t in snapshot if t["participant_id"]==participant["id"] and t["status"]=="ok")
+                peers="\n\n".join(f"{t['name']} ({t['position']}) — {t['stage']}: {t['text']}" for t in snapshot if t["participant_id"]!=participant["id"] and t["status"]=="ok")
+                target=participants[(index+1)%len(participants)]
+                target_instruction=f"Address your question specifically to {target['name']} ({target['position']})." if stage=="cross_examination" else ""
+                prompt=f"""DEBATE QUESTION:\n{question}\n\nDEBATE FORMAT:\n{debate_format}: {format_rules[debate_format]}\n\nYOUR IDENTITY:\nYou are {participant['name']}. Your assigned position is: {participant['position']}\n\nYOUR OWN PREVIOUS STATEMENTS — you wrote these; never attribute them to an opponent:\n{own or '(none yet)'}\n\nOPPONENT STATEMENTS — written by other participants:\n{peers or '(none yet)'}\n\nUSER INTERVENTION:\n{live_intervention or '(none)'}\n\nCURRENT STAGE — {stage.replace('_',' ').upper()}:\n{stage_rules[stage]} {target_instruction}\nAdvance the debate without recap."""
+                agent={"agent_name":participant["name"],"provider":participant["provider"],"model":participant["model"],"role":f"Debater assigned to defend: {participant['position']}","instructions":format_rules[debate_format],"max_sentences":5}
+                yield {"type":"turn_start","stage":stage,"stage_index":stage_index,"participant":participant}
+                text="";usage={"input_tokens":0,"output_tokens":0}
+                try:
+                    provider=self._provider_for_agent(agent)
+                    async for event in provider.stream(prompt,self._agent_system_prompt(agent)):
+                        if event["type"]=="delta":text+=event["text"];yield {"type":"turn_delta","stage":stage,"participant_id":participant["id"],"text":event["text"]}
+                        elif event["type"]=="usage":usage={"input_tokens":event.get("input_tokens",0),"output_tokens":event.get("output_tokens",0)}
+                    turn={"stage":stage,"stage_index":stage_index,"participant_id":participant["id"],"name":participant["name"],"position":participant["position"],"provider":participant["provider"],"model":participant["model"],"status":"ok","text":text,"error":"","usage_provider":provider.provider_id,**usage}
+                except Exception as exc:
+                    turn={"stage":stage,"stage_index":stage_index,"participant_id":participant["id"],"name":participant["name"],"position":participant["position"],"provider":participant["provider"],"model":participant["model"],"status":"error","text":text,"error":str(exc),"usage_provider":participant["provider"],**usage}
+                turns.append(turn);request_count+=1;yield {"type":"turn_done","turn":turn}
+        transcript="\n\n".join(f"[{t['stage']}] {t['name']} ({t['position']}): {t['text'] or t['error']}" for t in turns)
+        jury_agent={"agent_name":"Independent Jury","provider":jury["provider"],"model":jury["model"],"role":"Impartial debate judge","instructions":"Judge argument quality, not model reputation or assigned position.","max_sentences":5}
+        jury_prompt=f"""QUESTION:\n{question}\n\nDEBATE TRANSCRIPT:\n{transcript[-90000:]}\n\nReturn only valid JSON with this schema: {{\"verdict\":\"concise decision\",\"winner_id\":\"participant id or tie\",\"strongest_argument\":\"...\",\"consensus\":[\"...\"],\"disagreements\":[{{\"claim\":\"...\",\"positions\":\"...\"}}],\"unresolved_questions\":[\"...\"],\"scores\":[{{\"participant_id\":\"...\",\"reasoning\":0,\"evidence\":0,\"responsiveness\":0,\"consistency\":0,\"total\":0,\"justification\":\"...\"}}]}}. Score each dimension 0-10 and total 0-40. Base every score only on this transcript."""
+        yield {"type":"jury_start","jury":jury}
+        try:
+            jury_provider=self._provider_for_agent(jury_agent);result=await self._safe_ask(jury_provider,jury_prompt,self._agent_system_prompt(jury_agent));request_count+=1
+            if result.status!="ok":raise ValueError(result.error)
+            candidate=result.text.strip();match=re.search(r"```(?:json)?\s*(\{.*\})\s*```",candidate,re.S)
+            report=json.loads(match.group(1) if match else candidate);report["jury"]={**jury,"usage_provider":result.usage_provider,"input_tokens":result.input_tokens,"output_tokens":result.output_tokens}
+        except Exception as exc:
+            report={"verdict":"The jury could not produce a structured verdict.","winner_id":"tie","strongest_argument":"","consensus":[],"disagreements":[],"unresolved_questions":[str(exc)],"scores":[],"jury":jury}
+        yield {"type":"report","report":report}
+        yield {"type":"complete","turns":turns,"report":report,"request_count":request_count}
 
     async def _synthesize(self, prompt: str, answers: dict[str, str]) -> ProviderResult:
         provider_name = "openai" if self.synthesis_provider == "jury" else self.synthesis_provider

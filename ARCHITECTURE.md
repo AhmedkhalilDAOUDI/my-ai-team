@@ -4,8 +4,8 @@ The browser talks only to the local FastAPI service. FastAPI validates identity,
 
 ```text
 Browser interfaces
-  ├─ Direct Workspace ─┐
-  ├─ Team Discussion ──┼─ FastAPI ─ Orchestrator ─ Provider adapters
+  ├─ Debate Engine ────┐
+  ├─ Direct Workspace ─┼─ FastAPI ─ Orchestrator ─ Provider adapters
   ├─ Live Chat ────────┤     │              ├─ OpenAI Responses API
   ├─ Builder Workspace ┤     │              ├─ DeepSeek Chat API
   └─ Studio ───────────┘     │              ├─ Isolated Git worktrees
@@ -15,6 +15,8 @@ Browser interfaces
                              ├─ Job worker ─ evaluations, workflows, n8n
                              └─ SQLite (projects, prompts, knowledge, runs, usage)
 ```
+
+The Debate Engine is the primary product boundary. It validates two to four participants, preserves each model's identity and owned statements across four stages, routes live moderator instructions between stages, and asks a separately configured jury for a structured scorecard and verdict. Full transcripts and reports are persisted as project-scoped runs; legacy discussion endpoints remain available for compatibility.
 
 Builder Workspace adds a separate mutation boundary: FastAPI creates a task-specific Git branch and worktree, models return validated structured file operations, and a fixed command allowlist performs verification without invoking a shell. The main worktree remains read-only until the user explicitly approves a merge; dirty-main checks prevent accidental mixing with unrelated local changes.
 
