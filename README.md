@@ -18,10 +18,12 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 
 ## Included features
 
-- Structured debates with opening statements, cross-examination, rebuttals, closing positions, and an independent jury.
+- Structured debates with opening statements, cross-examination, rebuttals, closing positions, and one to three blind juries.
 - Per-debater provider, model, identity, and position selection with strict ownership of previous statements.
 - Adversarial, decision, and Socratic formats; live moderator pause/intervention; chronological and side-by-side views.
-- Jury scoring for reasoning, evidence, responsiveness, and consistency, plus common ground, disagreements, unresolved questions, and a verdict.
+- Aggregated jury scoring for reasoning, evidence, responsiveness, and consistency, plus agreement, common ground, disagreements, unresolved questions, and a verdict.
+- Open, cite-facts, and sources-only evidence policies; a structured claim ledger; citation-label and cited-turn coverage audits; and an optional single-model baseline benchmark.
+- Reusable debate templates, blind convergence checks, jury appeals, live checkpoints, and reproducibility metadata.
 - Saved, replayable, exportable debates with evidence attachments and a conservative pre-run cost estimate.
 - Visual workflow builder with create, rename, reorder, remove, and execution-mode controls.
 - Agent editor with validated provider-specific model selectors, roles, instructions, peer visibility, and sentence limits.
@@ -85,6 +87,8 @@ The app then redirects browser users to the local sign-in screen. The owner can 
 ## Retrieval, graph, and automation
 
 Every uploaded document is chunked, indexed, and given stable citations such as `D3C7`. Keyword retrieval works locally with no extra cost. Semantic embeddings are opt-in under Studio Settings and use `EMBEDDING_MODEL`; enabling them makes separately billed provider API calls.
+
+The debate citation audit checks whether cited `D#C#` labels exist in the supplied evidence and measures citation coverage across turns. It does not independently prove that a source entails a model's claim; the claim ledger and jury review are decision support, not a factual guarantee.
 
 Set `NEO4J_URI`, `NEO4J_USERNAME`, and `NEO4J_PASSWORD` to enable graph synchronization. n8n can queue a workflow through `POST /api/webhooks/n8n/workflows/{workflow_id}` and monitor it through `GET /api/jobs`. Jobs survive application restarts.
 

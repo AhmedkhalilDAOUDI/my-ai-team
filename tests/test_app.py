@@ -318,14 +318,15 @@ def test_builder_workspace_isolated_branch_paths_and_merge(tmp_path):
     assert merged['status']=='merged' and (repository/'README.md').read_text()=='updated\n'
 
 def test_debate_stream_contract_and_persistence(monkeypatch):
-    async def fake_debate(self,question,participants,jury,debate_format,intervention='',moderator_context=None):
+    async def fake_debate(self,question,participants,jury,debate_format,intervention='',moderator_context=None,evidence_policy='open',benchmark=False,auto_stop_on_convergence=True):
         for stage in ('opening','cross_examination','rebuttal','closing'):
             for participant in participants:
                 yield {'type':'turn_start','stage':stage,'stage_index':1,'participant':participant}
                 yield {'type':'turn_delta','stage':stage,'participant_id':participant['id'],'text':f'{stage} argument'}
                 turn={'stage':stage,'stage_index':1,'participant_id':participant['id'],'name':participant['name'],'position':participant['position'],'provider':participant['provider'],'model':participant['model'],'status':'ok','text':f'{stage} argument','error':'','usage_provider':participant['provider'],'input_tokens':1,'output_tokens':1}
                 yield {'type':'turn_done','turn':turn}
-        report={'verdict':'Position A wins','winner_id':'a','strongest_argument':'A','consensus':['Shared fact'],'disagreements':[{'claim':'Choice','positions':'A vs B'}],'unresolved_questions':['Cost?'],'scores':[],'jury':{**jury,'usage_provider':jury['provider'],'input_tokens':1,'output_tokens':1}}
+        jury_item=jury[0] if isinstance(jury,list) else jury
+        report={'verdict':'Position A wins','winner_id':'a','strongest_argument':'A','consensus':['Shared fact'],'disagreements':[{'claim':'Choice','positions':'A vs B'}],'unresolved_questions':['Cost?'],'scores':[],'jury_reports':[{'jury':{**jury_item,'usage_provider':jury_item['provider'],'input_tokens':1,'output_tokens':1}}]}
         yield {'type':'jury_start','jury':jury};yield {'type':'report','report':report};yield {'type':'complete','turns':[],'report':report,'request_count':9}
     monkeypatch.setattr(ThesisTeam,'stream_debate',fake_debate)
     payload={'question':'Which approach is better?','participants':[{'id':'a','name':'Advocate','provider':'openai','model':'gpt-5.6-sol','position':'Position A'},{'id':'b','name':'Skeptic','provider':'deepseek','model':'deepseek-v4-pro','position':'Position B'}],'jury':{'provider':'openai','model':'gpt-5.6-sol'},'debate_format':'adversarial','document_ids':[]}
@@ -357,7 +358,43 @@ def test_debate_preserves_speaker_identity_and_structured_stages(monkeypatch):
     debaters=[{'id':'alpha','name':'Alpha','provider':'openai','model':'gpt-5.6-sol','position':'A'},{'id':'beta','name':'Beta','provider':'deepseek','model':'deepseek-v4-pro','position':'B'}]
     async def collect():return [event async for event in team.stream_debate('Question',debaters,{'provider':'openai','model':'gpt-5.6-sol'},'adversarial')]
     events=asyncio.run(collect());complete=events[-1]
-    assert complete['type']=='complete' and complete['request_count']==9
+    assert complete['type']=='complete' and complete['request_count']==10
     assert {turn['stage'] for turn in complete['turns']}=={'opening','cross_examination','rebuttal','closing'}
     assert 'YOUR OWN PREVIOUS STATEMENTS' in prompts[2] and 'opening: Alpha claim' in prompts[2]
     assert 'OPPONENT STATEMENTS' in prompts[2] and 'Beta (B) — opening: Beta claim' in prompts[2]
+
+def test_debate_evidence_audit_blind_aggregation_and_templates():
+    turns=[{'participant_id':'a','status':'ok','text':'Supported [D1C1]'},{'participant_id':'a','status':'ok','text':'Invalid [D9C9]'},{'participant_id':'b','status':'ok','text':'No citation'}]
+    audit=ThesisTeam._citation_audit(turns,'Evidence [D1C1]','cite_facts')
+    assert audit['participants']['a']['valid']==['D1C1'] and audit['participants']['a']['invalid']==['D9C9']
+    assert not audit['participants']['a']['passes'] and not audit['participants']['b']['passes']
+    participants=[{'id':'a'},{'id':'b'}]
+    reports=[{'winner_id':'a','verdict':'A','scores':[{'participant_id':'a','total':32,'reasoning':8,'evidence':8,'responsiveness':8,'consistency':8},{'participant_id':'b','total':24,'reasoning':6,'evidence':6,'responsiveness':6,'consistency':6}]},{'winner_id':'a','scores':[{'participant_id':'a','total':36,'reasoning':9,'evidence':9,'responsiveness':9,'consistency':9},{'participant_id':'b','total':28,'reasoning':7,'evidence':7,'responsiveness':7,'consistency':7}]}]
+    aggregate=ThesisTeam._aggregate_juries(reports,participants)
+    assert aggregate['winner_id']=='a' and aggregate['scores'][0]['total']==34 and aggregate['jury_agreement']==1
+    assert len(client.get('/api/debate/templates').json())>=4
+
+def test_sources_only_requires_documents():
+    payload={'question':'Which approach?','participants':[{'id':'a','name':'A','provider':'openai','model':'gpt-5.6-sol','position':'Position A'},{'id':'b','name':'B','provider':'deepseek','model':'deepseek-v4-pro','position':'Position B'}],'juries':[{'provider':'openai','model':'gpt-5.6-sol'}],'debate_format':'decision','evidence_policy':'sources_only','document_ids':[]}
+    response=client.post('/api/debate/stream',json=payload)
+    assert response.status_code==422 and 'shared document' in response.json()['detail']
+
+def test_debate_stops_after_blind_convergence(monkeypatch):
+    class FakeProvider:
+        model='fake-model';provider_id='fake';last_usage={}
+        def __init__(self):self.ask_count=0
+        async def stream(self,prompt,system_prompt):
+            yield {'type':'delta','text':'Concise argument'}
+            yield {'type':'usage','input_tokens':1,'output_tokens':1}
+        async def ask(self,prompt,system_prompt):
+            self.ask_count+=1
+            if self.ask_count==1:return '{"converged":true,"reason":"The recommendation and rationale match."}'
+            return '{"verdict":"Consensus","winner_id":"tie","strongest_argument":"Shared rationale","converged":true,"consensus":["Same recommendation"],"disagreements":[],"unresolved_questions":[],"claims":[],"scores":[]}'
+    team=ThesisTeam(Settings(openai_api_key='x',deepseek_api_key='x'));fake=FakeProvider()
+    monkeypatch.setattr(team,'_provider_for_agent',lambda agent:fake)
+    debaters=[{'id':'a','name':'A','provider':'openai','model':'gpt-5.6-sol','position':'A'},{'id':'b','name':'B','provider':'deepseek','model':'deepseek-v4-pro','position':'B'}]
+    async def collect():return [event async for event in team.stream_debate('Question',debaters,[{'provider':'openai','model':'gpt-5.6-sol'}],'decision')]
+    complete=asyncio.run(collect())[-1]
+    assert 'closing' not in {turn['stage'] for turn in complete['turns']}
+    assert complete['report']['converged'] is True
+    assert complete['report']['convergence_check']['usage']['input_tokens']==0

@@ -226,8 +226,22 @@ Advance the work without unnecessary recap."""
         yield {"type": "synthesis", "result": vars(synthesis)}
         yield {"type": "complete", "turns": turns, "synthesis": vars(synthesis), "request_count": request_count}
 
-    async def stream_debate(self, question: str, participants: list[dict], jury: dict, debate_format: str, intervention: str = "", moderator_context=None) -> AsyncIterator[dict]:
+    async def stream_debate(self, question: str, participants: list[dict], jury, debate_format: str, intervention: str = "", moderator_context=None, evidence_policy: str = "open", benchmark: bool = False, auto_stop_on_convergence: bool = True) -> AsyncIterator[dict]:
         turns, request_count = [], 0
+        juries = jury if isinstance(jury, list) else [jury]
+        evidence_rules = {
+            "open": "You may use supplied evidence and general knowledge. Never fabricate citations.",
+            "cite_facts": "Cite supplied evidence with exact [D#C#] labels for every material factual claim; clearly label unsupported inference.",
+            "sources_only": "Use only supplied evidence. Every material factual claim must include an exact [D#C#] citation; say when evidence is insufficient.",
+        }
+        baseline = None
+        convergence_check = None
+        if benchmark:
+            baseline_agent={"agent_name":"Baseline","provider":participants[0]["provider"],"model":participants[0]["model"],"role":"Independent decision maker","instructions":"Answer without seeing any debate.","max_sentences":5}
+            baseline_provider=self._provider_for_agent(baseline_agent)
+            baseline_result=await self._safe_ask(baseline_provider,f"QUESTION:\n{question}\n\nGive the best independent answer. {evidence_rules[evidence_policy]}",self._agent_system_prompt(baseline_agent));request_count+=1
+            baseline={"status":baseline_result.status,"text":baseline_result.text,"error":baseline_result.error,"provider":participants[0]["provider"],"model":participants[0]["model"],"usage_provider":baseline_result.usage_provider,"input_tokens":baseline_result.input_tokens,"output_tokens":baseline_result.output_tokens}
+            yield {"type":"baseline","baseline":baseline}
         stages = ["opening", "cross_examination", "rebuttal", "closing"]
         format_rules = {
             "adversarial": "Challenge opposing claims directly and concede only when the argument warrants it.",
@@ -248,7 +262,7 @@ Advance the work without unnecessary recap."""
                 peers="\n\n".join(f"{t['name']} ({t['position']}) — {t['stage']}: {t['text']}" for t in snapshot if t["participant_id"]!=participant["id"] and t["status"]=="ok")
                 target=participants[(index+1)%len(participants)]
                 target_instruction=f"Address your question specifically to {target['name']} ({target['position']})." if stage=="cross_examination" else ""
-                prompt=f"""DEBATE QUESTION:\n{question}\n\nDEBATE FORMAT:\n{debate_format}: {format_rules[debate_format]}\n\nYOUR IDENTITY:\nYou are {participant['name']}. Your assigned position is: {participant['position']}\n\nYOUR OWN PREVIOUS STATEMENTS — you wrote these; never attribute them to an opponent:\n{own or '(none yet)'}\n\nOPPONENT STATEMENTS — written by other participants:\n{peers or '(none yet)'}\n\nUSER INTERVENTION:\n{live_intervention or '(none)'}\n\nCURRENT STAGE — {stage.replace('_',' ').upper()}:\n{stage_rules[stage]} {target_instruction}\nAdvance the debate without recap."""
+                prompt=f"""DEBATE QUESTION:\n{question}\n\nDEBATE FORMAT:\n{debate_format}: {format_rules[debate_format]}\n\nEVIDENCE POLICY:\n{evidence_rules[evidence_policy]}\n\nYOUR IDENTITY:\nYou are {participant['name']}. Your assigned position is: {participant['position']}\n\nYOUR OWN PREVIOUS STATEMENTS — you wrote these; never attribute them to an opponent:\n{own or '(none yet)'}\n\nOPPONENT STATEMENTS — written by other participants:\n{peers or '(none yet)'}\n\nUSER INTERVENTION:\n{live_intervention or '(none)'}\n\nCURRENT STAGE — {stage.replace('_',' ').upper()}:\n{stage_rules[stage]} {target_instruction}\nAdvance the debate without recap."""
                 agent={"agent_name":participant["name"],"provider":participant["provider"],"model":participant["model"],"role":f"Debater assigned to defend: {participant['position']}","instructions":format_rules[debate_format],"max_sentences":5}
                 yield {"type":"turn_start","stage":stage,"stage_index":stage_index,"participant":participant}
                 text="";usage={"input_tokens":0,"output_tokens":0}
@@ -261,19 +275,73 @@ Advance the work without unnecessary recap."""
                 except Exception as exc:
                     turn={"stage":stage,"stage_index":stage_index,"participant_id":participant["id"],"name":participant["name"],"position":participant["position"],"provider":participant["provider"],"model":participant["model"],"status":"error","text":text,"error":str(exc),"usage_provider":participant["provider"],**usage}
                 turns.append(turn);request_count+=1;yield {"type":"turn_done","turn":turn}
-        transcript="\n\n".join(f"[{t['stage']}] {t['name']} ({t['position']}): {t['text'] or t['error']}" for t in turns)
-        jury_agent={"agent_name":"Independent Jury","provider":jury["provider"],"model":jury["model"],"role":"Impartial debate judge","instructions":"Judge argument quality, not model reputation or assigned position.","max_sentences":5}
-        jury_prompt=f"""QUESTION:\n{question}\n\nDEBATE TRANSCRIPT:\n{transcript[-90000:]}\n\nReturn only valid JSON with this schema: {{\"verdict\":\"concise decision\",\"winner_id\":\"participant id or tie\",\"strongest_argument\":\"...\",\"consensus\":[\"...\"],\"disagreements\":[{{\"claim\":\"...\",\"positions\":\"...\"}}],\"unresolved_questions\":[\"...\"],\"scores\":[{{\"participant_id\":\"...\",\"reasoning\":0,\"evidence\":0,\"responsiveness\":0,\"consistency\":0,\"total\":0,\"justification\":\"...\"}}]}}. Score each dimension 0-10 and total 0-40. Base every score only on this transcript."""
-        yield {"type":"jury_start","jury":jury}
-        try:
-            jury_provider=self._provider_for_agent(jury_agent);result=await self._safe_ask(jury_provider,jury_prompt,self._agent_system_prompt(jury_agent));request_count+=1
-            if result.status!="ok":raise ValueError(result.error)
-            candidate=result.text.strip();match=re.search(r"```(?:json)?\s*(\{.*\})\s*```",candidate,re.S)
-            report=json.loads(match.group(1) if match else candidate);report["jury"]={**jury,"usage_provider":result.usage_provider,"input_tokens":result.input_tokens,"output_tokens":result.output_tokens}
-        except Exception as exc:
-            report={"verdict":"The jury could not produce a structured verdict.","winner_id":"tie","strongest_argument":"","consensus":[],"disagreements":[],"unresolved_questions":[str(exc)],"scores":[],"jury":jury}
+            if stage=="rebuttal" and auto_stop_on_convergence:
+                blind={participant["id"]:f"P{idx+1}" for idx,participant in enumerate(participants)}
+                checkpoint="\n\n".join(f"[{turn['stage']}] {blind[turn['participant_id']]}: {turn['text']}" for turn in turns if turn["status"]=="ok")
+                convergence_agent={"agent_name":"Convergence Monitor","provider":juries[0]["provider"],"model":juries[0]["model"],"role":"Blind debate convergence monitor","instructions":"Stop only when the material recommendation and reasoning have converged.","max_sentences":2}
+                convergence_provider=self._provider_for_agent(convergence_agent);check=await self._safe_ask(convergence_provider,f"QUESTION:\n{question}\n\nANONYMIZED DEBATE:\n{checkpoint[-60000:]}\n\nReturn only JSON: {{\"converged\":true|false,\"reason\":\"...\"}}",self._agent_system_prompt(convergence_agent));request_count+=1
+                try:
+                    candidate=check.text.strip();match=re.search(r"```(?:json)?\s*(\{.*\})\s*```",candidate,re.S);convergence=json.loads(match.group(1) if match else candidate) if check.status=="ok" else {"converged":False,"reason":check.error}
+                except Exception:convergence={"converged":False,"reason":"Convergence check was inconclusive."}
+                convergence["usage"]={"usage_provider":check.usage_provider,"model":juries[0]["model"],"input_tokens":check.input_tokens,"output_tokens":check.output_tokens}
+                convergence_check=convergence
+                yield {"type":"convergence","convergence":convergence}
+                if convergence.get("converged"):break
+        aliases={participant["id"]:f"P{index+1}" for index,participant in enumerate(participants)}
+        reverse_aliases={value:key for key,value in aliases.items()}
+        transcript="\n\n".join(f"[{t['stage']}] {aliases[t['participant_id']]}: {t['text'] or t['error']}" for t in turns)
+        reports=[]
+        for jury_index,jury_item in enumerate(juries,start=1):
+            jury_agent={"agent_name":f"Independent Jury {jury_index}","provider":jury_item["provider"],"model":jury_item["model"],"role":"Impartial blind debate judge","instructions":"Participant identities and model providers are hidden. Judge only transcript quality.","max_sentences":5}
+            baseline_block=f"\n\nINDEPENDENT BASELINE ANSWER:\n{baseline['text']}" if baseline and baseline.get("status")=="ok" else ""
+            jury_prompt=f"""QUESTION:\n{question}\n\nANONYMIZED DEBATE TRANSCRIPT:\n{transcript[-90000:]}{baseline_block}\n\nReturn only valid JSON with this schema: {{\"verdict\":\"concise decision\",\"winner_id\":\"P1, P2, ... or tie\",\"strongest_argument\":\"...\",\"converged\":false,\"consensus\":[\"...\"],\"disagreements\":[{{\"claim\":\"...\",\"positions\":\"...\"}}],\"unresolved_questions\":[\"...\"],\"claims\":[{{\"claim_id\":\"C1\",\"participant_id\":\"P1\",\"claim\":\"...\",\"citations\":[\"D1C1\"],\"status\":\"supported|challenged|conceded|unresolved\",\"challenged_by\":[\"P2\"]}}],\"scores\":[{{\"participant_id\":\"P1\",\"reasoning\":0,\"evidence\":0,\"responsiveness\":0,\"consistency\":0,\"total\":0,\"justification\":\"...\"}}],\"debate_vs_baseline\":{{\"winner\":\"debate|baseline|tie|not_run\",\"reason\":\"...\"}}}}. Score each dimension 0-10 and total 0-40. Base every score only on the anonymized text; never infer model identity."""
+            yield {"type":"jury_start","jury_index":jury_index,"jury":{"label":f"Jury {jury_index}"}}
+            try:
+                jury_provider=self._provider_for_agent(jury_agent);result=await self._safe_ask(jury_provider,jury_prompt,self._agent_system_prompt(jury_agent));request_count+=1
+                if result.status!="ok":raise ValueError(result.error)
+                candidate=result.text.strip();match=re.search(r"```(?:json)?\s*(\{.*\})\s*```",candidate,re.S);item=json.loads(match.group(1) if match else candidate)
+                item["winner_id"]=reverse_aliases.get(item.get("winner_id"),item.get("winner_id","tie"))
+                for score in item.get("scores",[]):score["participant_id"]=reverse_aliases.get(score.get("participant_id"),score.get("participant_id"))
+                for claim in item.get("claims",[]):
+                    claim["participant_id"]=reverse_aliases.get(claim.get("participant_id"),claim.get("participant_id"));claim["challenged_by"]=[reverse_aliases.get(value,value) for value in claim.get("challenged_by",[])]
+                item["jury"]={**jury_item,"usage_provider":result.usage_provider,"input_tokens":result.input_tokens,"output_tokens":result.output_tokens};reports.append(item)
+            except Exception as exc:reports.append({"verdict":"Jury failed.","winner_id":"tie","consensus":[],"disagreements":[],"unresolved_questions":[str(exc)],"claims":[],"scores":[],"jury":jury_item})
+        report=self._aggregate_juries(reports,participants)
+        report["citation_audit"]=self._citation_audit(turns,question,evidence_policy)
+        report["baseline"]=baseline
+        report["convergence_check"]=convergence_check
+        if convergence_check and convergence_check.get("converged"):report["converged"]=True
+        report["blind_jury_count"]=len(juries)
+        report["jury_reports"]=reports
         yield {"type":"report","report":report}
         yield {"type":"complete","turns":turns,"report":report,"request_count":request_count}
+
+    @staticmethod
+    def _citation_audit(turns: list[dict], question: str, evidence_policy: str):
+        valid=set(re.findall(r"\[?(D\d+C\d+)\]?",question));by_participant={}
+        for turn in turns:
+            if turn.get("status")!="ok":continue
+            found=set(re.findall(r"\[?(D\d+C\d+)\]?",turn.get("text","")));entry=by_participant.setdefault(turn["participant_id"],{"valid":set(),"invalid":set(),"turns":0,"cited_turns":0})
+            entry["turns"]+=1;entry["valid"].update(found&valid);entry["invalid"].update(found-valid);entry["cited_turns"]+=bool(found&valid)
+        return {"policy":evidence_policy,"available_citations":sorted(valid),"participants":{key:{"valid":sorted(value["valid"]),"invalid":sorted(value["invalid"]),"coverage":round(value["cited_turns"]/max(1,value["turns"]),2),"passes":not value["invalid"] and (evidence_policy=="open" or value["cited_turns"]==value["turns"])} for key,value in by_participant.items()}}
+
+    @staticmethod
+    def _aggregate_juries(reports: list[dict], participants: list[dict]):
+        totals={participant["id"]:[] for participant in participants};dimensions={participant["id"]:{name:[] for name in ("reasoning","evidence","responsiveness","consistency")} for participant in participants}
+        for report in reports:
+            for score in report.get("scores",[]):
+                participant_id=score.get("participant_id")
+                if participant_id not in totals:continue
+                totals[participant_id].append(float(score.get("total",0)))
+                for name in dimensions[participant_id]:dimensions[participant_id][name].append(float(score.get(name,0)))
+        scores=[]
+        for participant in participants:
+            participant_id=participant["id"];average=lambda values:round(sum(values)/len(values),1) if values else 0
+            scores.append({"participant_id":participant_id,"total":average(totals[participant_id]),**{name:average(values) for name,values in dimensions[participant_id].items()},"justification":f"Average of {len(totals[participant_id])} blind jury score(s)."})
+        ranked=sorted(scores,key=lambda item:item["total"],reverse=True);winner="tie" if len(ranked)>1 and abs(ranked[0]["total"]-ranked[1]["total"])<0.5 else ranked[0]["participant_id"] if ranked else "tie"
+        votes=[report.get("winner_id","tie") for report in reports];agreement=round(max((votes.count(value) for value in set(votes)),default=0)/max(1,len(votes)),2)
+        primary=reports[0] if reports else {}
+        return {"verdict":primary.get("verdict","No valid jury verdict."),"winner_id":winner,"strongest_argument":primary.get("strongest_argument",""),"converged":all(report.get("converged",False) for report in reports) if reports else False,"consensus":primary.get("consensus",[]),"disagreements":primary.get("disagreements",[]),"unresolved_questions":primary.get("unresolved_questions",[]),"claims":primary.get("claims",[]),"scores":scores,"jury_agreement":agreement,"debate_vs_baseline":primary.get("debate_vs_baseline",{"winner":"not_run","reason":""})}
 
     async def _synthesize(self, prompt: str, answers: dict[str, str]) -> ProviderResult:
         provider_name = "openai" if self.synthesis_provider == "jury" else self.synthesis_provider

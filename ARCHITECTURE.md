@@ -16,7 +16,7 @@ Browser interfaces
                              └─ SQLite (projects, prompts, knowledge, runs, usage)
 ```
 
-The Debate Engine is the primary product boundary. It validates two to four participants, preserves each model's identity and owned statements across four stages, routes live moderator instructions between stages, and asks a separately configured jury for a structured scorecard and verdict. Full transcripts and reports are persisted as project-scoped runs; legacy discussion endpoints remain available for compatibility.
+The Debate Engine is the primary product boundary. It validates two to four participants, preserves each model's identity and owned statements across four stages, routes live moderator instructions between stages, and anonymizes the resulting transcript before one to three independently configured juries score it. Jury reports are aggregated deterministically, while evidence policies, a claim ledger, citation-label auditing, optional baseline comparison, and blind convergence checks make the decision process inspectable. Full transcripts, checkpoints, usage, reproducibility metadata, appeals, and reports are persisted as project-scoped runs; legacy discussion endpoints remain available for compatibility.
 
 Builder Workspace adds a separate mutation boundary: FastAPI creates a task-specific Git branch and worktree, models return validated structured file operations, and a fixed command allowlist performs verification without invoking a shell. The main worktree remains read-only until the user explicitly approves a merge; dirty-main checks prevent accidental mixing with unrelated local changes.
 
