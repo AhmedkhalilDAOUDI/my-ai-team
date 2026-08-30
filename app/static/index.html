@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My AI Team</title>
+  <link rel="stylesheet" href="/static/styles.css?v=standard-1">
+  <link rel="stylesheet" href="/static/discussion.css?v=standard-1">
+  <link rel="stylesheet" href="/static/pipeline.css?v=standard-1">
+</head>
+<body>
+  <main class="shell">
+    <nav class="nav"><a class="brand" href="/">My AI Team</a><div><a class="active" href="/">Direct workspace</a><a href="/discussion">Team discussion</a><a href="/chat">Live chat</a><a href="/studio">Studio</a></div></nav>
+    <header><div class="eyebrow">DIRECT WORKSPACE</div><h1>Ask your AI team</h1><p>Get independent answers from three complementary AI partners.</p></header>
+    <form id="ask-form" class="composer">
+      <label for="prompt">What should the team work on?</label>
+      <textarea id="prompt" maxlength="20000" placeholder="e.g. Compare vector RAG and GraphRAG for multi-hop questions…" required></textarea>
+      <div class="workflow-picker"><label for="workflow-select">Workflow</label><select id="workflow-select" required><option value="">Loading workflows…</option></select><span id="workflow-description">Choose which saved team should run this task.</span></div>
+      <div class="direct-model-picker"><label>ChatGPT model<select id="direct-openai-model"></select></label><label>DeepSeek model<select id="direct-deepseek-model"></select></label><span>These choices apply to every matching agent in this run.</span></div>
+      <div class="direct-model-picker"><label>Shared documents<select id="direct-documents" multiple size="3"></select></label><label>Saved runs<select id="direct-runs"><option value="">Select a previous run</option></select></label><span>Select multiple documents with Command/Ctrl.</span></div>
+      <div class="direct-model-picker"><label>Start at step<select id="start-step"></select></label><label>Stop after step<select id="stop-step"></select></label><label>Skip steps<input id="skip-steps" placeholder="e.g. 2,4"></label></div>
+      <div class="actions">
+        <div id="pipeline-label" class="pipeline-label">Loading team…</div>
+        <label class="file-button">Attach once <input id="file-input" type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.json"></label><button id="stop-run" class="danger" type="button" hidden>Stop</button><button type="submit">Ask the team <span>→</span></button>
+      </div>
+    </form>
+    <div id="notice" class="notice" aria-live="polite"></div>
+    <section id="provider-grid" class="grid" aria-label="Workflow responses"></section>
+    <section class="synthesis panel"><div class="panel-head"><span class="spark">✦</span><div><div class="eyebrow">TEAM CONSENSUS</div><h2>Final synthesis</h2></div></div><div id="synthesis" class="answer idle">The combined answer will appear here.</div></section>
+    <div id="run-exports" class="run-exports"></div>
+  </main>
+  <script src="/static/uploads.js"></script><script src="/static/page-state.js"></script><script src="/static/app.js?v=model-selector-1"></script>
+</body>
+</html>
