@@ -251,6 +251,15 @@ class DebateAppealInput(BaseModel):
     reason: str = Field(min_length=3, max_length=5000)
 
 
+class DebateFeedbackInput(BaseModel):
+    usefulness: int = Field(ge=1, le=5)
+    outcome: Literal["accepted", "partially_accepted", "rejected", "undecided"]
+    changed_mind: bool = False
+    jury_error: bool = False
+    decision: str = Field(default="", max_length=500)
+    notes: str = Field(default="", max_length=2000)
+
+
 class WebSourceInput(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     analyze_visuals: bool = True
@@ -625,6 +634,55 @@ async def appeal_debate(run_id: int,data: DebateAppealInput):
     appeal={"reason":data.reason,"status":ruling.status,"ruling":ruling.text or ruling.error,"provider":jury["provider"],"model":jury["model"],"created_unix":time.time()}
     result.setdefault("appeals",[]).append(appeal);store.finish_run(run_id,"completed",result)
     return appeal
+
+
+def debate_run_cost(result: dict, settings) -> float:
+    items=list(result.get("turns") or [])
+    report=result.get("report") or {}
+    if report.get("baseline"):items.append(report["baseline"])
+    convergence=report.get("convergence_check") or {}
+    if convergence.get("usage"):items.append(convergence["usage"])
+    items.extend(item.get("jury",{}) for item in report.get("jury_reports") or [])
+    return round(sum(calculate_cost(item.get("usage_provider") or item.get("provider", ""),int(item.get("input_tokens",0) or 0),int(item.get("output_tokens",0) or 0),settings,item.get("model")) for item in items),6)
+
+
+@app.get("/api/debate/{run_id}/feedback")
+async def get_debate_feedback(run_id: int):
+    run=store.run_detail(run_id)
+    if not run or run["interface"]!="debate":raise HTTPException(status_code=404,detail="Debate not found")
+    return platform.debate_feedback(run_id) or {}
+
+
+@app.put("/api/debate/{run_id}/feedback")
+async def save_debate_feedback(run_id: int,data: DebateFeedbackInput):
+    run=store.run_detail(run_id)
+    if not run or run["interface"]!="debate" or run["status"]!="completed":raise HTTPException(status_code=404,detail="Completed debate not found")
+    return platform.save_debate_feedback(run_id,{**data.model_dump(),"decision":data.decision.strip(),"notes":data.notes.strip()})
+
+
+@app.get("/api/debate/insights/summary")
+async def debate_insights():
+    settings=runtime_settings();runs=[run for run in store.list_runs(500) if run["interface"]=="debate" and run["status"]=="completed"]
+    feedback_by_run={item["run_id"]:item for item in platform.debate_feedback()};comparisons={"debate":0,"baseline":0,"tie":0,"not_run":0};formats={};recent=[]
+    total_cost=0.0;agreement=[];scores=[];converged=0;request_counts=[];durations=[]
+    for run in runs:
+        result=run.get("result") or {};report=result.get("report") or {};comparison=(report.get("debate_vs_baseline") or {}).get("winner","not_run")
+        comparisons[comparison if comparison in comparisons else "not_run"]+=1;debate_format=result.get("debate_format","unknown");formats[debate_format]=formats.get(debate_format,0)+1
+        cost=debate_run_cost(result,settings);total_cost+=cost
+        if report.get("jury_agreement") is not None:agreement.append(float(report["jury_agreement"]))
+        if report.get("converged"):converged+=1
+        if result.get("request_count") is not None:request_counts.append(int(result["request_count"]))
+        report_scores=[float(item.get("total",0)) for item in report.get("scores") or []]
+        if report_scores:scores.append(sum(report_scores)/len(report_scores))
+        try:
+            created=time.mktime(time.strptime(run["created_at"],"%Y-%m-%d %H:%M:%S"));updated=time.mktime(time.strptime(run["updated_at"],"%Y-%m-%d %H:%M:%S"));durations.append(max(0,updated-created))
+        except (ValueError,TypeError):pass
+        feedback=feedback_by_run.get(run["id"])
+        recent.append({"run_id":run["id"],"prompt":run["prompt"],"created_at":run["created_at"],"format":debate_format,"verdict":report.get("verdict",""),"winner_id":report.get("winner_id","tie"),"comparison":comparison,"jury_agreement":report.get("jury_agreement"),"converged":bool(report.get("converged")),"cost_usd":cost,"request_count":result.get("request_count",0),"feedback":feedback})
+    feedback=list(feedback_by_run.values());rated=len(feedback);accepted=sum(item["outcome"]=="accepted" for item in feedback);partial=sum(item["outcome"]=="partially_accepted" for item in feedback)
+    count=len(runs);benchmark_count=sum(comparisons[key] for key in ("debate","baseline","tie"));confidence="insufficient" if rated<5 or benchmark_count<5 else "early" if rated<20 or benchmark_count<20 else "directional"
+    average=lambda values:round(sum(values)/len(values),3) if values else None
+    return {"sample":{"completed_debates":count,"rated_debates":rated,"benchmarked_debates":benchmark_count,"confidence":confidence},"outcomes":{"accepted_rate":round(accepted/rated,3) if rated else None,"accepted_or_partial_rate":round((accepted+partial)/rated,3) if rated else None,"average_usefulness":average([item["usefulness"] for item in feedback]),"changed_mind_rate":round(sum(item["changed_mind"] for item in feedback)/rated,3) if rated else None,"jury_error_rate":round(sum(item["jury_error"] for item in feedback)/rated,3) if rated else None},"benchmark":{"counts":comparisons,"debate_win_rate":round(comparisons["debate"]/benchmark_count,3) if benchmark_count else None},"operations":{"total_cost_usd":round(total_cost,6),"average_cost_usd":round(total_cost/count,6) if count else None,"average_duration_seconds":average(durations),"average_requests":average(request_counts)},"quality":{"average_jury_agreement":average(agreement),"convergence_rate":round(converged/count,3) if count else None,"average_score_out_of_40":average(scores)},"formats":formats,"recent":recent[:50]}
 
 
 @app.post("/api/debate/{run_id}/control")
@@ -1074,6 +1132,17 @@ def run_markdown(run: dict) -> str:
         if report.get("baseline"):
             comparison = report.get("debate_vs_baseline", {})
             lines.extend(["", "## Debate versus baseline", "", f"**Result:** {comparison.get('winner', 'not_run')}", "", comparison.get("reason", "")])
+    feedback = run.get("feedback")
+    if feedback:
+        lines.extend([
+            "", "## Human evaluation", "",
+            f"- **Usefulness:** {feedback.get('usefulness', 'Not rated')}/5",
+            f"- **Outcome:** {feedback.get('outcome', 'undecided').replace('_', ' ').title()}",
+            f"- **Changed the user's mind:** {'Yes' if feedback.get('changed_mind') else 'No'}",
+            f"- **Jury error flagged:** {'Yes' if feedback.get('jury_error') else 'No'}",
+        ])
+        if feedback.get("decision"): lines.extend(["", "### Decision taken", "", feedback["decision"]])
+        if feedback.get("notes"): lines.extend(["", "### Evaluation notes", "", feedback["notes"]])
     return "\n".join(lines)
 
 
@@ -1081,6 +1150,8 @@ def run_markdown(run: dict) -> str:
 async def export_run(run_id: int, format: Literal["markdown", "json", "pdf"] = "markdown"):
     run = store.run_detail(run_id)
     if not run: raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("interface") == "debate":
+        run = {**run, "feedback": platform.debate_feedback(run_id)}
     if format == "json": return Response(json.dumps(run, indent=2), media_type="application/json", headers={"Content-Disposition": f"attachment; filename=run-{run_id}.json"})
     markdown = run_markdown(run)
     if format == "markdown": return Response(markdown, media_type="text/markdown", headers={"Content-Disposition": f"attachment; filename=run-{run_id}.md"})

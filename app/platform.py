@@ -72,6 +72,13 @@ class PlatformStore:
               score REAL NOT NULL, latency_ms INTEGER NOT NULL, cost_usd REAL NOT NULL DEFAULT 0,
               details TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS debate_feedback (
+              id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+              project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              usefulness INTEGER NOT NULL, outcome TEXT NOT NULL, changed_mind INTEGER NOT NULL DEFAULT 0,
+              jury_error INTEGER NOT NULL DEFAULT 0, decision TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS jobs (
               id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
               kind TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
@@ -240,6 +247,23 @@ class PlatformStore:
             cursor=db.execute("""INSERT INTO evaluation_results(suite_id,case_id,workflow_id,answer,score,latency_ms,cost_usd,details)
               VALUES (?,?,?,?,?,?,?,?)""",(suite_id,case_id,workflow_id,answer,score,latency_ms,cost_usd,json.dumps(details)))
             return dict(db.execute("SELECT * FROM evaluation_results WHERE id=?",(cursor.lastrowid,)).fetchone())
+
+    def save_debate_feedback(self, run_id: int, data: dict):
+        with self.store.connect() as db:
+            db.execute("""INSERT INTO debate_feedback(run_id,project_id,usefulness,outcome,changed_mind,jury_error,decision,notes)
+              VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET usefulness=excluded.usefulness,
+              outcome=excluded.outcome,changed_mind=excluded.changed_mind,jury_error=excluded.jury_error,
+              decision=excluded.decision,notes=excluded.notes,updated_at=CURRENT_TIMESTAMP""",
+              (run_id,current_project_id(),data["usefulness"],data["outcome"],int(data["changed_mind"]),int(data["jury_error"]),data["decision"],data["notes"]))
+            row=db.execute("SELECT * FROM debate_feedback WHERE run_id=? AND project_id=?",(run_id,current_project_id())).fetchone()
+            return dict(row)
+
+    def debate_feedback(self, run_id: int | None = None):
+        with self.store.connect() as db:
+            if run_id is not None:
+                row=db.execute("SELECT * FROM debate_feedback WHERE run_id=? AND project_id=?",(run_id,current_project_id())).fetchone()
+                return dict(row) if row else None
+            return [dict(row) for row in db.execute("SELECT * FROM debate_feedback WHERE project_id=? ORDER BY id DESC",(current_project_id(),))]
 
     def create_job(self, project_id: int, kind: str, payload: dict):
         with self.store.connect() as db:

@@ -437,6 +437,27 @@ def test_debate_cost_estimate_counts_every_planned_call():
     assert 0 < data['estimated_cost_usd'] <= data['maximum_cost_usd']
     assert data['assumptions']['expected_output_tokens_per_call']==350
 
+def test_debate_feedback_and_evaluation_insights_lifecycle():
+    run=store.create_run('debate','Should the team adopt option A?')
+    result={'debate_format':'decision','request_count':4,'turns':[{'usage_provider':'openai','model':'gpt-5.6-luna','input_tokens':100,'output_tokens':50}], 'report':{'verdict':'Adopt A','winner_id':'a','converged':True,'jury_agreement':1.0,'scores':[{'participant_id':'a','total':34},{'participant_id':'b','total':28}],'debate_vs_baseline':{'winner':'debate','reason':'Better tradeoff analysis'},'jury_reports':[]}}
+    store.finish_run(run['id'],'completed',result)
+    try:
+        feedback={'usefulness':5,'outcome':'accepted','changed_mind':True,'jury_error':False,'decision':'Adopted option A','notes':'The rebuttal exposed the main risk.'}
+        saved=client.put(f"/api/debate/{run['id']}/feedback",json=feedback)
+        assert saved.status_code==200 and saved.json()['outcome']=='accepted'
+        assert client.get(f"/api/debate/{run['id']}/feedback").json()['usefulness']==5
+        insights=client.get('/api/debate/insights/summary')
+        assert insights.status_code==200
+        data=insights.json();item=next(item for item in data['recent'] if item['run_id']==run['id'])
+        assert item['feedback']['decision']=='Adopted option A'
+        assert data['sample']['rated_debates']>=1 and data['benchmark']['counts']['debate']>=1
+        assert item['cost_usd']>0
+        markdown=client.get(f"/api/runs/{run['id']}/export?format=markdown")
+        assert markdown.status_code==200 and '## Human evaluation' in markdown.text and 'Adopted option A' in markdown.text
+        exported=client.get(f"/api/runs/{run['id']}/export?format=json").json()
+        assert exported['feedback']['usefulness']==5
+    finally:store.delete_run(run['id'])
+
 def test_debate_stops_after_blind_convergence(monkeypatch):
     class FakeProvider:
         model='fake-model';provider_id='fake';last_usage={}

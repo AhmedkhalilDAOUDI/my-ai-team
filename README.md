@@ -28,6 +28,7 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 - External-source importing for readable webpages and multimodal YouTube analysis. Videos combine captions with sampled visual scenes, actions, diagrams, and on-screen text before becoming cited debate evidence.
 - Reusable debate templates, blind convergence checks, jury appeals, live checkpoints, and reproducibility metadata.
 - Saved, replayable, exportable debates with evidence attachments and a conservative pre-run cost estimate.
+- A Debate Evaluation Lab with human usefulness and outcome feedback, debate-versus-baseline results, jury agreement, convergence, latency, token-derived cost, and transparent sample-confidence labels.
 - Visual workflow builder with create, rename, reorder, remove, and execution-mode controls.
 - Agent editor with validated provider-specific model selectors, roles, instructions, peer visibility, and sentence limits.
 - True incremental streaming and Stop controls in Debate, Direct Workspace, and Live Chat.
@@ -50,9 +51,9 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 
 Work should continue in this order:
 
-1. **Evidence that debate helps.** Build a fixed benchmark covering factual questions, architecture decisions, thesis review, and adversarial prompts. Compare single-model answers with debates on correctness, reasoning quality, calibration, latency, and cost. Without this evaluation, the app can demonstrate debate but cannot prove its value.
+1. **A validated benchmark corpus.** The Evaluation Lab now measures debate outcomes, but the app still needs a fixed, expert-labeled corpus covering factual questions, architecture decisions, thesis review, and adversarial prompts before it can prove that debate improves correctness.
 2. **Claim-level evidence verification.** The current citation audit checks citation labels and turn coverage. A separate verifier still needs to test whether each cited passage supports, contradicts, or fails to support the exact claim.
-3. **Human outcome feedback.** Users need controls to rate the verdict, mark the decision they accepted, flag jury mistakes, and explain whether the debate changed their mind. Those records should feed evaluation reports rather than model training by default.
+3. **Broader human evaluation.** Individual feedback is now stored locally and included in reports. Add blind multi-reviewer scoring, reviewer expertise, inter-rater agreement, and adjudication for disputed labels.
 4. **Reliable long-running imports.** YouTube download, caption extraction, frame analysis, and indexing currently happen during one request. Move them to resumable background jobs with progress, cancellation, retries, and cleanup after crashes.
 5. **Video coverage beyond captions and fixed samples.** Add audio transcription when captions are unavailable, scene-change-based sampling, timestamps linked to claims, and an option to inspect extracted frames before paying for a debate. Twelve sampled frames cannot represent every visual event in a long video.
 6. **True debate recovery.** Checkpoints preserve completed turns, but a stopped server does not automatically resume from the next unfinished stage. Recovery should preserve the original models, prompts, evidence snapshot, and cost state.
@@ -61,7 +62,7 @@ Work should continue in this order:
 9. **Production data and operations.** Replace SQLite for multi-user deployment, move files to object storage, add workers, health monitoring, structured logs, backups with restore drills, and CI deployment checks.
 10. **Provider capability and failure handling.** Detect whether each selected model supports the requested modality, show provider health, support fallback models, and explain partial debates when one provider fails.
 
-The recommended next build is the benchmark and human-feedback system. It will show which debate formats, models, jury setups, and evidence policies improve results and which combinations only add cost.
+The recommended next build is the expert-labeled benchmark corpus and claim-level verifier. The Evaluation Lab already exposes which formats, jury setups, and evidence policies correlate with better outcomes; the benchmark will make those comparisons scientifically defensible.
 
 ## Builder Workspace
 
@@ -78,13 +79,19 @@ Studio contains eight tabs:
 1. **Agents** — create agents and assign a provider, model, role, and response contract.
 2. **Workflows** — build ordered agent pipelines and choose Respond, Critique, Questions, Audit, or Synthesize for each step.
 3. **Knowledge** — save reusable documents. Select them in Debate or Direct Workspace when their contents should be shared with the team.
-4. **Evaluations** — create repeatable test cases and run them against a workflow in the background.
+4. **Evaluations** — inspect the Debate Evaluation Lab, compare debate performance with a single-model baseline, review cost and quality metrics, and run repeatable workflow test suites in the background.
 5. **Graph** — inspect extracted entities and relationships or synchronize them to Neo4j.
 6. **Integrations** — configure provider plugins, create isolated users, connect n8n, and back up or restore the app.
 7. **Settings** — inspect provider configuration and change output, embedding, timeout, warning, and budget controls.
 8. **Runs** — inspect persisted runs and background jobs, then export results as Markdown, PDF, or JSON.
 
 API keys deliberately remain in `.env`; Studio never writes secrets into SQLite.
+
+### How debate evaluation works
+
+After a debate finishes, its report includes a private feedback form for a 1–5 usefulness rating, accepted/rejected outcome, decision taken, changed-mind signal, and jury-error flag. This feedback stays in the local project database and is not sent to a model for training.
+
+Studio computes operational metrics from saved runs and provider usage, not estimates: token-derived cost, elapsed time, API requests, jury agreement, convergence rate, and jury score. Baseline win rate appears only for debates that actually ran the optional single-model benchmark. The confidence banner labels fewer than five rated or benchmarked debates as **insufficient**, fewer than twenty as **early evidence**, and larger samples as **directional**; it deliberately does not claim statistical proof.
 
 ## Docker
 
