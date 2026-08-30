@@ -1,6 +1,6 @@
 # My AI Team
 
-My AI Team is a local multi-agent workspace for running OpenAI, DeepSeek, and OpenAI-compatible providers as configurable agents. It provides Direct Workspace, controlled Team Discussion, persistent Live Chat, and a Studio control center.
+My AI Team is a local multi-agent workspace for running OpenAI, DeepSeek, and OpenAI-compatible providers as configurable agents. It provides Direct Workspace, controlled Team Discussion, persistent Live Chat, an isolated Builder Workspace, and a Studio control center.
 
 ## Quick start
 
@@ -33,6 +33,15 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 - Hybrid document retrieval with source citations, optional OpenAI embeddings, and automatic knowledge-graph extraction.
 - Evaluation suites, durable background jobs, prompt-version history, Neo4j synchronization, and n8n webhooks.
 - Provider plugins, full backup/restore, and isolated per-user workspaces with one-time access tokens.
+- A Builder Workspace where the Supervisor implements changes, DeepSeek reviews and corrects them, tests run locally, and the user approves the Git merge.
+
+## Builder Workspace
+
+Builder tasks run in separate Git worktrees and branches. The Supervisor receives a bounded snapshot of tracked text files and returns structured file changes; the DeepSeek critic reviews the resulting diff and can make corrective edits. The app then runs one explicitly selected allowlisted test command without a shell.
+
+The interface shows the stage timeline, changed files, test output, and complete diff. Rejected work remains isolated for audit. Approval requires an explicit confirmation and is blocked while the main workspace has uncommitted changes; models never write directly to the current branch.
+
+Builder is intended for trusted local repositories. Review every diff before merging, keep secrets outside tracked files, and use normal Git protection and backups for important projects.
 
 ## Studio
 
@@ -89,7 +98,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Tests never call paid APIs. They cover the interfaces, CRUD, execution, validation, conversations, streaming, retrieval and citations, graph extraction, evaluations, durable jobs, prompt versions, plugins, backups, settings, run history, costs, and exports.
+Tests never call paid APIs. They cover the interfaces, CRUD, execution, validation, conversations, streaming, retrieval and citations, graph extraction, evaluations, durable jobs, prompt versions, plugins, backups, Builder worktree isolation and merge behavior, settings, run history, costs, and exports.
 
 ## Architecture and extension points
 

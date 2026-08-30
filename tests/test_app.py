@@ -1,4 +1,7 @@
 import asyncio
+import subprocess
+import uuid
+import pytest
 from fastapi.testclient import TestClient
 from app.main import app, store
 from app.config import Settings
@@ -7,7 +10,7 @@ from app.orchestrator import ProviderResult, ThesisTeam
 client=TestClient(app)
 
 def test_pages_and_health():
-    assert all(client.get(path).status_code==200 for path in ("/","/discussion","/chat","/studio"))
+    assert all(client.get(path).status_code==200 for path in ("/","/discussion","/chat","/builder","/studio"))
     assert set(client.get("/api/health").json()["providers"])=={"openai","deepseek","jury","auditor"}
 
 def test_every_interface_keeps_its_browser_state():
@@ -278,7 +281,7 @@ def test_neo4j_sync_requires_configuration(monkeypatch):
 def test_new_user_gets_seeded_isolated_workspace():
     from app.main import platform
     from app.storage import CURRENT_PROJECT_ID
-    username='isolated-test-user'
+    username=f'isolated-test-{uuid.uuid4().hex[:8]}'
     user=platform.create_user(username,'Isolated test workspace')
     token=CURRENT_PROJECT_ID.set(user['project_id'])
     try:
@@ -290,4 +293,26 @@ def test_new_user_gets_seeded_isolated_workspace():
     finally:
         CURRENT_PROJECT_ID.reset(token)
         with store.connect() as db:
+            db.execute('DELETE FROM users WHERE id=?',(user['id'],))
             db.execute('DELETE FROM projects WHERE id=?',(user['project_id'],))
+
+def test_builder_workspace_isolated_branch_paths_and_merge(tmp_path):
+    from app.builder import BuilderError, BuilderWorkspace
+    from app.storage import Store
+    repository=tmp_path/'repository';repository.mkdir()
+    subprocess.run(['git','init','-b','main'],cwd=repository,check=True,capture_output=True)
+    subprocess.run(['git','config','user.email','builder-test@example.invalid'],cwd=repository,check=True)
+    subprocess.run(['git','config','user.name','Builder Test'],cwd=repository,check=True)
+    (repository/'README.md').write_text('initial\n')
+    subprocess.run(['git','add','.'],cwd=repository,check=True)
+    subprocess.run(['git','commit','-m','initial'],cwd=repository,check=True,capture_output=True)
+    isolated_store=Store(tmp_path/'builder.db');workspace=BuilderWorkspace(isolated_store,repository)
+    session=workspace.create(1,'Update the readme','none')
+    worktree=__import__('pathlib').Path(session['worktree'])
+    assert worktree.exists() and session['branch'].startswith('builder/session-')
+    with pytest.raises(BuilderError):workspace.apply_changes(worktree,[{'path':'../escape.txt','action':'write','content':'bad'}])
+    workspace.apply_changes(worktree,[{'path':'README.md','action':'write','content':'updated\n'},{'path':'new.txt','action':'write','content':'new file\n'}])
+    assert 'b/new.txt' in workspace.detail(session['id'],1)['diff']
+    workspace.update(session['id'],status='ready')
+    merged=workspace.merge(session['id'],1)
+    assert merged['status']=='merged' and (repository/'README.md').read_text()=='updated\n'

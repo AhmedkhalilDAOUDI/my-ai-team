@@ -275,7 +275,14 @@ class PlatformStore:
     def create_user(self, username: str, project_name: str):
         token=secrets.token_urlsafe(32)
         with self.store.connect() as db:
-            project_id=db.execute("INSERT INTO projects(name,description) VALUES (?,?)",(project_name,f"Private workspace for {username}")).lastrowid
+            project_id=db.execute("""SELECT MAX(value) + 1 FROM (
+              SELECT COALESCE(MAX(id),0) value FROM projects
+              UNION ALL SELECT COALESCE(MAX(project_id),0) FROM agents
+              UNION ALL SELECT COALESCE(MAX(project_id),0) FROM workflows
+              UNION ALL SELECT COALESCE(MAX(project_id),0) FROM documents
+              UNION ALL SELECT COALESCE(MAX(project_id),0) FROM runs
+            )""").fetchone()[0]
+            db.execute("INSERT INTO projects(id,name,description) VALUES (?,?,?)",(project_id,project_name,f"Private workspace for {username}"))
             user_id=db.execute("INSERT INTO users(username,token_hash) VALUES (?,?)",(username,self.token_hash(token))).lastrowid
             db.execute("INSERT INTO project_members(user_id,project_id,role) VALUES (?,?,?)",(user_id,project_id,"owner"))
             agents = [

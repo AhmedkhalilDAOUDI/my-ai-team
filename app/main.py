@@ -20,6 +20,7 @@ from .uploads import extract_file
 from .storage import CURRENT_PROJECT_ID, Store, current_project_id
 from .usage import approximate_tokens, calculate_cost
 from .platform import PlatformStore, terms
+from .builder import BuilderError, BuilderWorkspace
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -38,6 +39,7 @@ app = FastAPI(title="My AI Team", version="1.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 store = Store()
 platform = PlatformStore(store)
+builder = BuilderWorkspace(store, BASE_DIR.parent)
 
 RUNTIME_SETTING_KEYS = {"max_output_tokens", "cost_warning_usd", "daily_budget_usd", "request_timeout_seconds", "enable_embeddings"}
 
@@ -166,6 +168,13 @@ async def _execute_platform_job_scoped(job: dict):
             for turn in turns: record_result_usage(turn)
             record_result_usage(synthesis)
         return {"suite_id": suite["id"], "workflow_id": workflow["id"], "results": results}
+    if job["kind"] == "builder":
+        session = builder.detail(int(payload["session_id"]), int(job["project_id"]))
+        if not session: raise ValueError("Builder session no longer exists")
+        await builder.execute(session, runtime_settings())
+        completed = builder.detail(session["id"], int(job["project_id"]))
+        if completed and completed["status"] == "failed": raise ValueError(completed["error"])
+        return {"session_id": session["id"], "status": completed["status"] if completed else "missing"}
     raise ValueError(f"Unsupported job kind: {job['kind']}")
 
 
@@ -209,6 +218,15 @@ class ChatReplyRequest(BaseModel):
 class ProjectInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
+
+
+class BuilderSessionInput(BaseModel):
+    task: str = Field(min_length=3, max_length=20_000)
+    test_command: Literal["python", "pytest", "npm", "none"] = "python"
+
+
+class BuilderDecisionInput(BaseModel):
+    confirm: str = Field(min_length=1, max_length=20)
 
 
 class AgentInput(BaseModel):
@@ -375,6 +393,11 @@ async def chat_page():
 @app.get("/studio", include_in_schema=False)
 async def studio_page():
     return FileResponse(BASE_DIR / "static" / "studio.html")
+
+
+@app.get("/builder", include_in_schema=False)
+async def builder_page():
+    return FileResponse(BASE_DIR / "static" / "builder.html")
 
 
 @app.get("/api/health")
@@ -705,6 +728,43 @@ async def queue_evaluation(suite_id: int, data: EvaluationRunInput):
 
 @app.get("/api/jobs")
 async def list_jobs(limit: int = 100): return platform.jobs(max(1, min(limit, 500)))
+
+
+@app.get("/api/builder/sessions")
+async def builder_sessions(): return builder.list(current_project_id())
+
+
+@app.post("/api/builder/sessions", status_code=202)
+async def create_builder_session(data: BuilderSessionInput):
+    ensure_budget_available()
+    try:
+        session=builder.create(current_project_id(),data.task.strip(),data.test_command)
+        job=platform.create_job(current_project_id(),"builder",{"session_id":session["id"]})
+        return {**session,"job_id":job["id"]}
+    except BuilderError as exc: raise HTTPException(status_code=409,detail=str(exc)) from exc
+
+
+@app.get("/api/builder/sessions/{session_id}")
+async def builder_session_detail(session_id: int):
+    session=builder.detail(session_id,current_project_id())
+    if not session:raise HTTPException(status_code=404,detail="Builder session not found")
+    return session
+
+
+@app.post("/api/builder/sessions/{session_id}/merge")
+async def merge_builder_session(session_id: int,data: BuilderDecisionInput):
+    if data.confirm!="MERGE":raise HTTPException(status_code=400,detail="Set confirm to MERGE")
+    try:return builder.merge(session_id,current_project_id())
+    except BuilderError as exc:raise HTTPException(status_code=409,detail=str(exc)) from exc
+
+
+@app.post("/api/builder/sessions/{session_id}/reject")
+async def reject_builder_session(session_id: int,data: BuilderDecisionInput):
+    session=builder.detail(session_id,current_project_id())
+    if not session:raise HTTPException(status_code=404,detail="Builder session not found")
+    if data.confirm!="REJECT":raise HTTPException(status_code=400,detail="Set confirm to REJECT")
+    builder.update(session_id,status="rejected");builder.event(session_id,"rejected","User","Changes rejected; isolated files were retained for audit.")
+    return builder.detail(session_id,current_project_id())
 
 
 @app.post("/api/jobs/workflows/{workflow_id}", status_code=202)
