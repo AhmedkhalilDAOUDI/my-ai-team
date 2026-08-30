@@ -2,6 +2,8 @@
 
 My AI Team is a local AI debate workspace where selected models defend assigned positions, challenge one another, and receive an independent scored verdict. Direct Workspace, Live Chat, Builder, retrieval, and Studio support that central debate experience.
 
+The app is a working local MVP, not a production service. It is suitable for controlled experiments, thesis work, and trusted local use. The debate engine, persistence, evidence ingestion, cost previews, exports, and provider integrations work; the gaps listed below matter before treating its verdicts as reliable decisions or exposing it to unrelated users.
+
 ## Quick start
 
 Python 3.10 or newer is recommended.
@@ -43,6 +45,23 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 - Evaluation suites, durable background jobs, prompt-version history, Neo4j synchronization, and n8n webhooks.
 - Provider plugins, full backup/restore, and isolated per-user workspaces with one-time access tokens.
 - A Builder Workspace where the Supervisor implements changes, DeepSeek reviews and corrects them, tests run locally, and the user approves the Git merge.
+
+## What is still missing
+
+Work should continue in this order:
+
+1. **Evidence that debate helps.** Build a fixed benchmark covering factual questions, architecture decisions, thesis review, and adversarial prompts. Compare single-model answers with debates on correctness, reasoning quality, calibration, latency, and cost. Without this evaluation, the app can demonstrate debate but cannot prove its value.
+2. **Claim-level evidence verification.** The current citation audit checks citation labels and turn coverage. A separate verifier still needs to test whether each cited passage supports, contradicts, or fails to support the exact claim.
+3. **Human outcome feedback.** Users need controls to rate the verdict, mark the decision they accepted, flag jury mistakes, and explain whether the debate changed their mind. Those records should feed evaluation reports rather than model training by default.
+4. **Reliable long-running imports.** YouTube download, caption extraction, frame analysis, and indexing currently happen during one request. Move them to resumable background jobs with progress, cancellation, retries, and cleanup after crashes.
+5. **Video coverage beyond captions and fixed samples.** Add audio transcription when captions are unavailable, scene-change-based sampling, timestamps linked to claims, and an option to inspect extracted frames before paying for a debate. Twelve sampled frames cannot represent every visual event in a long video.
+6. **True debate recovery.** Checkpoints preserve completed turns, but a stopped server does not automatically resume from the next unfinished stage. Recovery should preserve the original models, prompts, evidence snapshot, and cost state.
+7. **Judge calibration and bias testing.** Rotate jury order, test position and verbosity bias, measure agreement against human labels, and prevent a model from judging its own output unless the user explicitly allows it.
+8. **Production security.** Replace the local token gate with proper accounts, HTTPS, secure sessions, rate limits, audit logs, encrypted secrets, stricter workspace isolation, and retention controls for imported content.
+9. **Production data and operations.** Replace SQLite for multi-user deployment, move files to object storage, add workers, health monitoring, structured logs, backups with restore drills, and CI deployment checks.
+10. **Provider capability and failure handling.** Detect whether each selected model supports the requested modality, show provider health, support fallback models, and explain partial debates when one provider fails.
+
+The recommended next build is the benchmark and human-feedback system. It will show which debate formats, models, jury setups, and evidence policies improve results and which combinations only add cost.
 
 ## Builder Workspace
 
