@@ -16,10 +16,13 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
-Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. A ChatGPT or DeepSeek consumer subscription does not automatically include API access; API credentials, quotas, and billing are managed separately by each provider.
+Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. OpenAI, DeepSeek, Google Gemini, and Anthropic Claude are built in and can be mixed within a debate. Consumer subscriptions do not automatically include API access; API credentials, quotas, and billing are managed separately by each provider.
 
 ## Included features
 
+- A simple-by-default interface: essential controls stay visible, specialist options live under **Advanced**, and Builder/Studio remain available under **More**.
+- A persistent light/dark theme switch shared across the application.
+- Built-in OpenAI, DeepSeek, Google Gemini, and Anthropic Claude integrations, plus modular OpenAI-compatible provider plugins.
 - Structured debates with opening statements, cross-examination, rebuttals, closing positions, and one to three blind juries.
 - Per-debater provider, model, identity, and position selection with strict ownership of previous statements.
 - Adversarial, decision, and Socratic formats; live moderator pause/intervention; chronological and side-by-side views.
@@ -86,6 +89,19 @@ Studio contains eight tabs:
 8. **Runs** — inspect persisted runs and background jobs, then export results as Markdown, PDF, or JSON.
 
 API keys deliberately remain in `.env`; Studio never writes secrets into SQLite.
+
+### Providers
+
+Add only the keys you intend to use:
+
+```dotenv
+OPENAI_API_KEY=
+DEEPSEEK_API_KEY=
+GEMINI_API_KEY=
+ANTHROPIC_API_KEY=
+```
+
+Gemini uses Google's documented OpenAI-compatible API surface for the app's shared text and streaming contract. Claude uses Anthropic's native Messages API and SSE stream, including provider-reported token usage. Default models and fallback token prices are configurable in `.env`; review provider pricing before a paid run because prices can change.
 
 ### How debate evaluation works
 

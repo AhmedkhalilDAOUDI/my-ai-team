@@ -4,7 +4,7 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from .config import Settings
-from .providers import DeepSeekProvider, OpenAICompatibleProvider, OpenAIProvider, Provider, SYSTEM_PROMPT
+from .providers import AnthropicProvider, DeepSeekProvider, GeminiProvider, OpenAICompatibleProvider, OpenAIProvider, Provider, SYSTEM_PROMPT
 
 
 @dataclass
@@ -36,6 +36,8 @@ Inspect the full work for consequential omissions, ignored constraints, unresolv
         self.providers: dict[str, Provider] = {
             "openai": OpenAIProvider(settings.openai_api_key, settings.openai_model, timeout, settings.max_output_tokens),
             "deepseek": DeepSeekProvider(settings.deepseek_api_key, settings.deepseek_model, timeout, settings.max_output_tokens),
+            "gemini": GeminiProvider(settings.gemini_api_key, settings.gemini_model, timeout, settings.max_output_tokens),
+            "anthropic": AnthropicProvider(settings.anthropic_api_key, settings.anthropic_model, timeout, settings.max_output_tokens),
             "jury": OpenAIProvider(settings.openai_api_key, settings.jury_model, timeout, settings.max_output_tokens),
             "auditor": DeepSeekProvider(settings.deepseek_api_key, settings.auditor_model, timeout, settings.max_output_tokens),
         }
@@ -54,6 +56,10 @@ Inspect the full work for consequential omissions, ignored constraints, unresolv
                 self.settings.deepseek_api_key, agent["model"], self.settings.request_timeout_seconds,
                 self.settings.max_output_tokens,
             )
+        elif agent["provider"] == "gemini":
+            provider = GeminiProvider(self.settings.gemini_api_key, agent["model"], self.settings.request_timeout_seconds, self.settings.max_output_tokens)
+        elif agent["provider"] == "anthropic":
+            provider = AnthropicProvider(self.settings.anthropic_api_key, agent["model"], self.settings.request_timeout_seconds, self.settings.max_output_tokens)
         else:
             import json, os
             from .platform import PlatformStore

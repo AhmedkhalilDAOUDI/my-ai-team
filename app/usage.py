@@ -7,6 +7,11 @@ MODEL_RATES = {
     "gpt-5.6-luna": (0.20, 1.20),
     "deepseek-v4-pro": (1.32, 3.96),
     "deepseek-v4-flash": (0.44, 1.32),
+    "gemini-3.7-flash": (0.75, 3.75),
+    "gemini-3.6-flash": (0.75, 3.75),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
 }
 
 
@@ -15,6 +20,10 @@ def rates(provider: str, settings: Settings, model: str | None = None) -> tuple[
         return MODEL_RATES[model]
     if provider == "openai":
         return settings.openai_input_cost_per_million, settings.openai_output_cost_per_million
+    if provider == "gemini":
+        return settings.gemini_input_cost_per_million, settings.gemini_output_cost_per_million
+    if provider == "anthropic":
+        return settings.anthropic_input_cost_per_million, settings.anthropic_output_cost_per_million
     return settings.deepseek_input_cost_per_million, settings.deepseek_output_cost_per_million
 
 

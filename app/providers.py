@@ -151,6 +151,67 @@ class DeepSeekProvider(Provider):
             raise ProviderError(f"{self.name} streaming request failed: {exc}") from exc
 
 
+class GeminiProvider(DeepSeekProvider):
+    """Gemini through Google's documented OpenAI-compatible endpoint."""
+    name = "Google Gemini"
+    provider_id = "gemini"
+
+    async def ask(self, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
+        key = self.require_key()
+        data = await self.post(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "x-goog-api-client": "my-ai-team/1.0"},
+            json={"model": self.model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], "max_tokens": self.max_output_tokens},
+        )
+        usage = data.get("usage") or {}
+        self.last_usage = {"input_tokens": usage.get("prompt_tokens", 0), "output_tokens": usage.get("completion_tokens", 0)}
+        try: return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc: raise ProviderError("Gemini returned no text response.") from exc
+
+    async def stream(self, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> AsyncIterator[dict]:
+        compatible = OpenAICompatibleProvider(self.name, self.api_key, self.model, self.timeout, self.max_output_tokens, "https://generativelanguage.googleapis.com/v1beta/openai")
+        compatible.provider_id = self.provider_id
+        async for event in compatible.stream(prompt, system_prompt): yield event
+
+
+class AnthropicProvider(Provider):
+    name = "Anthropic Claude"
+    provider_id = "anthropic"
+
+    async def ask(self, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
+        key = self.require_key()
+        data = await self.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+            json={"model": self.model, "system": system_prompt, "messages": [{"role": "user", "content": prompt}], "max_tokens": self.max_output_tokens},
+        )
+        usage = data.get("usage") or {}
+        self.last_usage = {"input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0)}
+        text = "\n".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text").strip()
+        if not text: raise ProviderError("Claude returned no text response.")
+        return text
+
+    async def stream(self, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> AsyncIterator[dict]:
+        key = self.require_key(); input_tokens = 0; output_tokens = 0
+        payload = {"model": self.model, "system": system_prompt, "messages": [{"role": "user", "content": prompt}], "max_tokens": self.max_output_tokens, "stream": True}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream("POST", "https://api.anthropic.com/v1/messages", headers={"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}, json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "): continue
+                        data = json.loads(line[6:]); event_type = data.get("type")
+                        if event_type == "message_start": input_tokens = (data.get("message", {}).get("usage") or {}).get("input_tokens", 0)
+                        elif event_type == "content_block_delta" and data.get("delta", {}).get("type") == "text_delta": yield {"type": "delta", "text": data["delta"]["text"]}
+                        elif event_type == "message_delta": output_tokens = (data.get("usage") or {}).get("output_tokens", output_tokens)
+                        elif event_type == "error": raise ProviderError((data.get("error") or {}).get("message", "Claude streaming response failed."))
+                    yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
+        except httpx.HTTPStatusError as exc:
+            detail = (await exc.response.aread()).decode(errors="replace")[:300]
+            raise ProviderError(f"{self.name} API returned {exc.response.status_code}: {detail}") from exc
+        except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc: raise ProviderError(f"{self.name} streaming request failed: {exc}") from exc
+
+
 class OpenAICompatibleProvider(DeepSeekProvider):
     provider_id = "plugin"
 

@@ -78,12 +78,21 @@ MODEL_CATALOG = {
         {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro", "description": "Strongest"},
         {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash", "description": "Fast and economical"},
     ],
+    "gemini": [
+        {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash", "description": "Strongest Gemini workhorse"},
+        {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash", "description": "Fast and balanced"},
+    ],
+    "anthropic": [
+        {"id": "claude-opus-5", "label": "Claude Opus 5", "description": "Strongest Claude"},
+        {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "description": "Balanced"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5", "description": "Fast and economical"},
+    ],
 }
 
 
 def model_catalog(settings):
     catalog = {provider: [dict(item) for item in items] for provider, items in MODEL_CATALOG.items()}
-    defaults = {"openai": settings.openai_model, "deepseek": settings.deepseek_model}
+    defaults = {"openai": settings.openai_model, "deepseek": settings.deepseek_model, "gemini": settings.gemini_model, "anthropic": settings.anthropic_model}
     for provider, default in defaults.items():
         if default not in {item["id"] for item in catalog[provider]}:
             catalog[provider].append({"id": default, "label": default, "description": "Configured default"})
@@ -605,7 +614,7 @@ async def estimate_debate(data: DebateEstimateInput):
     base_tokens=approximate_tokens(data.question+"\n"+evidence)+250
     calls=[];unknown=[]
     def add_call(label,provider,model,input_tokens,expected_tokens=expected_output):
-        if provider not in {"openai","deepseek"}:unknown.append(label);return
+        if provider not in {"openai","deepseek","gemini","anthropic"}:unknown.append(label);return
         selected=validate_model(provider,model,settings)
         calls.append({"label":label,"provider":provider,"model":selected,"input_tokens":input_tokens,"expected_output_tokens":expected_tokens,"estimated_cost_usd":calculate_cost(provider,input_tokens,expected_tokens,settings,selected),"maximum_cost_usd":calculate_cost(provider,input_tokens,maximum_output,settings,selected)})
     for stage_index,stage in enumerate(("opening","cross-examination","rebuttal","closing")):

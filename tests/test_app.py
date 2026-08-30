@@ -6,13 +6,14 @@ from fastapi.testclient import TestClient
 from app.main import app, store
 from app.config import Settings
 from app.orchestrator import ProviderResult, ThesisTeam
+from app.providers import AnthropicProvider, GeminiProvider
 from app.web_sources import SourceImportError, _ReadableHTML, _openai_visual_analysis, _select_caption_language, _validate_public_url, _yt_dlp_command
 
 client=TestClient(app)
 
 def test_pages_and_health():
     assert all(client.get(path).status_code==200 for path in ("/","/workspace","/discussion","/chat","/builder","/studio"))
-    assert set(client.get("/api/health").json()["providers"])=={"openai","deepseek","jury","auditor"}
+    assert set(client.get("/api/health").json()["providers"])=={"openai","deepseek","gemini","anthropic","jury","auditor"}
 
 def test_every_interface_keeps_its_browser_state():
     for path in ("/", "/workspace", "/discussion", "/chat", "/builder", "/studio"):
@@ -21,6 +22,26 @@ def test_every_interface_keeps_its_browser_state():
     assert 'my-ai-team:chat-runtime' in chat_script
     assert 'Array.isArray(saved.history)' in chat_script
     assert 'conversationId' in chat_script and 'conversation-select' in client.get('/chat').text
+    shared=client.get('/static/page-state.js').text
+    assert 'my-ai-team:theme' in shared and 'Advanced debate setup' in shared and 'Advanced run options' in shared
+
+def test_gemini_and_claude_are_available_with_pricing():
+    models=client.get('/api/models').json()
+    assert {'gemini-3.7-flash','gemini-3.6-flash'} <= {item['id'] for item in models['providers']['gemini']}
+    assert {'claude-opus-5','claude-sonnet-5'} <= {item['id'] for item in models['providers']['anthropic']}
+    payload={'question':'Choose an approach','participants':[{'id':'g','name':'Gemini','provider':'gemini','model':'gemini-3.7-flash','position':'Option A'},{'id':'c','name':'Claude','provider':'anthropic','model':'claude-sonnet-5','position':'Option B'}],'juries':[{'provider':'anthropic','model':'claude-opus-5'}]}
+    estimate=client.post('/api/debate/estimate',json=payload)
+    assert estimate.status_code==200
+    assert estimate.json()['priced_request_count']==estimate.json()['request_count']
+
+def test_gemini_and_claude_parse_native_usage(monkeypatch):
+    gemini=GeminiProvider('key','gemini-3.7-flash',30,500)
+    claude=AnthropicProvider('key','claude-opus-5',30,500)
+    async def gemini_post(*args,**kwargs): return {'choices':[{'message':{'content':'Gemini answer'}}],'usage':{'prompt_tokens':12,'completion_tokens':7}}
+    async def claude_post(*args,**kwargs): return {'content':[{'type':'text','text':'Claude answer'}],'usage':{'input_tokens':14,'output_tokens':8}}
+    monkeypatch.setattr(gemini,'post',gemini_post);monkeypatch.setattr(claude,'post',claude_post)
+    assert asyncio.run(gemini.ask('Question'))=='Gemini answer' and gemini.last_usage['output_tokens']==7
+    assert asyncio.run(claude.ask('Question'))=='Claude answer' and claude.last_usage['input_tokens']==14
 
 def test_fixed_pipeline(monkeypatch):
     calls=[]
