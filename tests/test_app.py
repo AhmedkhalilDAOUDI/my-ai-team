@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.main import app, store
 from app.config import Settings
 from app.orchestrator import ProviderResult, ThesisTeam
-from app.web_sources import SourceImportError, _ReadableHTML, _openai_visual_analysis, _validate_public_url
+from app.web_sources import SourceImportError, _ReadableHTML, _openai_visual_analysis, _select_caption_language, _validate_public_url, _yt_dlp_command
 
 client=TestClient(app)
 
@@ -84,6 +84,14 @@ def test_video_visual_analysis_sends_timestamped_image_inputs(monkeypatch,tmp_pa
     assert text.startswith('00:10') and usage['input_tokens']==120
     assert any(item.get('type')=='input_image' and item['image_url'].startswith('data:image/jpeg;base64,') for item in content)
     assert any(item.get('text')=='Approximate timestamp: 00:10' for item in content)
+
+def test_youtube_uses_project_extractor_and_one_original_caption(monkeypatch):
+    monkeypatch.setattr('app.web_sources.importlib.util.find_spec',lambda name:object())
+    command=_yt_dlp_command()
+    assert command[0]==__import__('sys').executable and command[1:]==['-m','yt_dlp']
+    assert _select_caption_language({'fr':[],'en-orig':[],'ar':[]})=='en-orig'
+    assert _select_caption_language({'de-orig':[],'es':[]})=='de-orig'
+    assert _select_caption_language({}) is None
 
 def test_studio_persistence_and_default_workflow():
     agents=client.get("/api/agents").json()

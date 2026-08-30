@@ -94,6 +94,8 @@ The debate citation audit checks whether cited `D#C#` labels exist in the suppli
 
 Paste a public article or YouTube URL into **Debate a website or full video** on the Debate page. With visual analysis enabled, the app downloads a bounded low-resolution copy, samples up to 12 chronological frames, and uses `VIDEO_VISION_MODEL` to describe directly visible actions, diagrams, scene changes, and on-screen text; this adds one separately billed OpenAI API call. Webpages must expose readable HTML or plain text, YouTube videos must have accessible manual or automatic captions, private-network URLs are blocked, and all imported material is treated as untrusted evidence. Frame sampling does not inspect every instant of a video, so increase the source scrutiny through the debate and jury rather than treating the visual summary as a perfect record.
 
+YouTube importing uses the project-pinned `yt-dlp` version rather than a potentially stale system installation. After pulling an update, rerun `pip install -r requirements.txt` (or rebuild Docker) before testing video imports.
+
 Set `NEO4J_URI`, `NEO4J_USERNAME`, and `NEO4J_PASSWORD` to enable graph synchronization. n8n can queue a workflow through `POST /api/webhooks/n8n/workflows/{workflow_id}` and monitor it through `GET /api/jobs`. Jobs survive application restarts.
 
 Provider plugins use an OpenAI-compatible HTTPS endpoint, an environment-variable name for the API key, and an explicit model list. Secrets stay in `.env`; only plugin metadata is stored in SQLite.

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import html
 import ipaddress
+import importlib.util
 import json
 import re
 import shutil
@@ -22,6 +23,18 @@ YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", 
 
 class SourceImportError(ValueError):
     pass
+
+
+def _yt_dlp_command() -> list[str]:
+    if importlib.util.find_spec("yt_dlp") is not None:return [sys.executable,"-m","yt_dlp"]
+    executable=shutil.which("yt-dlp")
+    if executable:return [executable]
+    raise SourceImportError("YouTube importing requires yt-dlp. Reinstall the project requirements.")
+
+
+def _select_caption_language(available: dict) -> str | None:
+    preferred=("en-orig","en","fr-orig","fr","ar-orig","ar")
+    return next((item for item in preferred if item in available),None) or next((item for item in available if item.endswith("-orig")),None) or next(iter(available),None)
 
 
 def _validate_public_url(url: str) -> str:
@@ -123,17 +136,25 @@ def _openai_visual_analysis(frames: list[tuple[float, Path]], api_key: str, mode
 
 
 def _youtube_sync(url: str, analyze_visuals: bool = False, vision_api_key: str | None = None, vision_model: str = "gpt-5.6-luna") -> dict:
-    executable=shutil.which("yt-dlp")
-    command=([executable] if executable else [sys.executable,"-m","yt_dlp"])+["--no-playlist","--skip-download","--write-subs","--write-auto-subs","--sub-langs","en.*,en,fr.*,fr,ar.*,ar","--sub-format","vtt","--dump-single-json","--no-warnings"]
+    yt_dlp=_yt_dlp_command()
     with tempfile.TemporaryDirectory(prefix="my-ai-team-source-") as directory:
-        command.extend(["-o",str(Path(directory)/"%(id)s.%(ext)s"),url])
-        try:result=subprocess.run(command,capture_output=True,text=True,timeout=90,check=False)
-        except (subprocess.TimeoutExpired,OSError) as exc:raise SourceImportError("YouTube caption extraction timed out or is unavailable.") from exc
+        metadata_command=yt_dlp+["--no-playlist","--skip-download","--dump-single-json","--no-warnings",url]
+        try:result=subprocess.run(metadata_command,capture_output=True,text=True,timeout=90,check=False)
+        except (subprocess.TimeoutExpired,OSError) as exc:raise SourceImportError("YouTube metadata extraction timed out or is unavailable.") from exc
         if result.returncode!=0:
             detail=(result.stderr or "YouTube could not provide this video.").strip().splitlines()[-1]
             raise SourceImportError(f"YouTube import failed: {detail[:300]}")
         try:metadata=json.loads(result.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError,IndexError) as exc:raise SourceImportError("YouTube returned invalid video metadata.") from exc
+        available={**(metadata.get("automatic_captions") or {}),**(metadata.get("subtitles") or {})}
+        language=_select_caption_language(available)
+        if not language:raise SourceImportError("This YouTube video has no accessible captions. Add captions or upload a transcript.")
+        caption_command=yt_dlp+["--no-playlist","--skip-download","--write-subs","--write-auto-subs","--sub-langs",language,"--sub-format","vtt","--no-simulate","--no-warnings","-o",str(Path(directory)/"%(id)s.%(ext)s"),url]
+        try:captions=subprocess.run(caption_command,capture_output=True,text=True,timeout=90,check=False)
+        except (subprocess.TimeoutExpired,OSError) as exc:raise SourceImportError("YouTube caption extraction timed out or is unavailable.") from exc
+        if captions.returncode!=0:
+            detail=(captions.stderr or "YouTube captions could not be downloaded.").strip().splitlines()[-1]
+            raise SourceImportError(f"YouTube caption import failed: {detail[:300]}")
         files=sorted(Path(directory).glob("*.vtt"),key=lambda path:path.stat().st_size,reverse=True)
         if not files:raise SourceImportError("This YouTube video has no accessible captions. Add captions or upload a transcript.")
         transcript=_clean_vtt(files[0].read_text(encoding="utf-8",errors="replace"))
@@ -146,7 +167,7 @@ def _youtube_sync(url: str, analyze_visuals: bool = False, vision_api_key: str |
             if not shutil.which("ffmpeg"):raise SourceImportError("Visual video analysis requires ffmpeg to be installed.")
             duration=float(metadata.get("duration") or 0)
             if duration<=0 or duration>10800:raise SourceImportError("Visual analysis supports videos up to 3 hours with a known duration.")
-            download=([executable] if executable else [sys.executable,"-m","yt_dlp"])+["--no-playlist","-f","best[height<=480]/worst","--max-filesize","250M","--no-warnings","-o",str(Path(directory)/"video.%(ext)s"),url]
+            download=yt_dlp+["--no-playlist","-f","bestvideo[height<=480][ext=mp4]/best[height<=480]/worst","--max-filesize","250M","--no-warnings","-o",str(Path(directory)/"video.%(ext)s"),url]
             try:downloaded=subprocess.run(download,capture_output=True,text=True,timeout=300,check=False)
             except (subprocess.TimeoutExpired,OSError) as exc:raise SourceImportError("The video download timed out or is unavailable.") from exc
             video_files=[path for path in Path(directory).glob("video.*") if path.suffix.lower() not in {".part",".ytdl"}]
