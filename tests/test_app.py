@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.main import app, store
 from app.config import Settings
 from app.orchestrator import ProviderResult, ThesisTeam
-from app.web_sources import SourceImportError, _ReadableHTML, _validate_public_url
+from app.web_sources import SourceImportError, _ReadableHTML, _openai_visual_analysis, _validate_public_url
 
 client=TestClient(app)
 
@@ -47,18 +47,21 @@ def test_upload():
 
 def test_web_source_import_is_saved_indexed_and_selected_by_ui(monkeypatch):
     from app import main
-    async def fake_source(url):
-        return {'title':'Example video','url':'https://www.youtube.com/watch?v=test','source_type':'youtube','text':'Transcript evidence about GraphRAG tradeoffs. '*8}
+    captured={}
+    async def fake_source(url,analyze_visuals=False,vision_api_key=None,vision_model=''):
+        captured.update({'analyze_visuals':analyze_visuals,'vision_model':vision_model})
+        return {'title':'Example video','url':'https://www.youtube.com/watch?v=test','source_type':'youtube_multimodal','text':'Visual scenes, on-screen text, and spoken evidence about GraphRAG tradeoffs. '*8,'usage':{}}
     monkeypatch.setattr(main,'extract_web_source',fake_source)
     response=client.post('/api/web-sources',json={'url':'https://www.youtube.com/watch?v=test'})
     assert response.status_code==201
     source=response.json()
     try:
-        assert source['source_type']=='youtube' and source['index']['chunks']>=1
+        assert source['source_type']=='youtube_multimodal' and source['index']['chunks']>=1
+        assert captured['analyze_visuals'] is True and captured['vision_model']=='gpt-5.6-luna'
         assert any(item['id']==source['id'] for item in client.get('/api/documents').json())
         page=client.get('/').text
         script=client.get('/static/discussion.js').text
-        assert 'Debate a website or video' in page and '/api/web-sources' in script and "sources_only" in script
+        assert 'Debate a website or full video' in page and 'analyze_visuals' in script and "sources_only" in script
     finally:client.delete(f"/api/documents/{source['id']}")
 
 def test_web_source_security_and_html_extraction():
@@ -67,6 +70,20 @@ def test_web_source_security_and_html_extraction():
     parser=_ReadableHTML();parser.feed('<html><title>Useful article</title><script>ignore me</script><article><h1>Claim</h1><p>Readable evidence.</p></article></html>')
     title,text=parser.result()
     assert title=='Useful article' and 'Readable evidence' in text and 'ignore me' not in text
+
+def test_video_visual_analysis_sends_timestamped_image_inputs(monkeypatch,tmp_path):
+    frame=tmp_path/'frame.jpg';frame.write_bytes(b'fake-jpeg')
+    captured={}
+    class Response:
+        def raise_for_status(self):pass
+        def json(self):return {'output_text':'00:10 - A chart is visible.','usage':{'input_tokens':120,'output_tokens':20}}
+    def fake_post(url,**kwargs):captured.update({'url':url,'payload':kwargs['json']});return Response()
+    monkeypatch.setattr('app.web_sources.httpx.post',fake_post)
+    text,usage=_openai_visual_analysis([(10,frame)],'test-key','gpt-5.6-luna')
+    content=captured['payload']['input'][0]['content']
+    assert text.startswith('00:10') and usage['input_tokens']==120
+    assert any(item.get('type')=='input_image' and item['image_url'].startswith('data:image/jpeg;base64,') for item in content)
+    assert any(item.get('text')=='Approximate timestamp: 00:10' for item in content)
 
 def test_studio_persistence_and_default_workflow():
     agents=client.get("/api/agents").json()
@@ -402,6 +419,15 @@ def test_sources_only_requires_documents():
     payload={'question':'Which approach?','participants':[{'id':'a','name':'A','provider':'openai','model':'gpt-5.6-sol','position':'Position A'},{'id':'b','name':'B','provider':'deepseek','model':'deepseek-v4-pro','position':'Position B'}],'juries':[{'provider':'openai','model':'gpt-5.6-sol'}],'debate_format':'decision','evidence_policy':'sources_only','document_ids':[]}
     response=client.post('/api/debate/stream',json=payload)
     assert response.status_code==422 and 'shared document' in response.json()['detail']
+
+def test_debate_cost_estimate_counts_every_planned_call():
+    payload={'question':'Compare the approaches','participants':[{'id':'a','name':'A','provider':'openai','model':'gpt-5.6-luna','position':'Option A'},{'id':'b','name':'B','provider':'deepseek','model':'deepseek-v4-flash','position':'Option B'}],'juries':[{'provider':'openai','model':'gpt-5.6-luna'},{'provider':'deepseek','model':'deepseek-v4-flash'}],'benchmark':True,'auto_stop_on_convergence':True,'document_ids':[]}
+    estimate=client.post('/api/debate/estimate',json=payload)
+    assert estimate.status_code==200
+    data=estimate.json()
+    assert data['request_count']==12 and data['priced_request_count']==12
+    assert 0 < data['estimated_cost_usd'] <= data['maximum_cost_usd']
+    assert data['assumptions']['expected_output_tokens_per_call']==350
 
 def test_debate_stops_after_blind_convergence(monkeypatch):
     class FakeProvider:

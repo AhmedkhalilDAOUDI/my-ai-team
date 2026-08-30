@@ -9,6 +9,7 @@ import tempfile
 import time
 import zipfile
 import httpx
+from urllib.parse import urlparse
 from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
@@ -22,7 +23,7 @@ from .storage import CURRENT_PROJECT_ID, Store, current_project_id
 from .usage import approximate_tokens, calculate_cost
 from .platform import PlatformStore, terms
 from .builder import BuilderError, BuilderWorkspace
-from .web_sources import SourceImportError, extract_web_source
+from .web_sources import SourceImportError, YOUTUBE_HOSTS, extract_web_source
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -232,6 +233,15 @@ class DebateRequest(BaseModel):
     document_ids: list[int] = Field(default_factory=list, max_length=50)
 
 
+class DebateEstimateInput(BaseModel):
+    question: str = Field(default="Debate preview", max_length=20_000)
+    participants: list[DebateParticipantInput] = Field(min_length=2, max_length=4)
+    juries: list[DebateJuryInput] = Field(min_length=1, max_length=3)
+    benchmark: bool = False
+    auto_stop_on_convergence: bool = True
+    document_ids: list[int] = Field(default_factory=list, max_length=50)
+
+
 class DebateControlInput(BaseModel):
     action: Literal["pause", "resume", "intervene"]
     message: str = Field(default="", max_length=5000)
@@ -243,6 +253,7 @@ class DebateAppealInput(BaseModel):
 
 class WebSourceInput(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
+    analyze_visuals: bool = True
 
 
 class ChatRequest(BaseModel):
@@ -578,6 +589,29 @@ async def debate_templates():
     ]
 
 
+@app.post("/api/debate/estimate")
+async def estimate_debate(data: DebateEstimateInput):
+    settings=runtime_settings();expected_output=min(settings.max_output_tokens,350);maximum_output=settings.max_output_tokens
+    evidence=store.document_context(data.document_ids,40_000) if data.document_ids else ""
+    base_tokens=approximate_tokens(data.question+"\n"+evidence)+250
+    calls=[];unknown=[]
+    def add_call(label,provider,model,input_tokens,expected_tokens=expected_output):
+        if provider not in {"openai","deepseek"}:unknown.append(label);return
+        selected=validate_model(provider,model,settings)
+        calls.append({"label":label,"provider":provider,"model":selected,"input_tokens":input_tokens,"expected_output_tokens":expected_tokens,"estimated_cost_usd":calculate_cost(provider,input_tokens,expected_tokens,settings,selected),"maximum_cost_usd":calculate_cost(provider,input_tokens,maximum_output,settings,selected)})
+    for stage_index,stage in enumerate(("opening","cross-examination","rebuttal","closing")):
+        prior_tokens=stage_index*len(data.participants)*expected_output
+        for participant in data.participants:add_call(f"{participant.name} {stage}",participant.provider,participant.model,base_tokens+prior_tokens)
+    if data.auto_stop_on_convergence:
+        jury=data.juries[0];add_call("Blind convergence check",jury.provider,jury.model,base_tokens+3*len(data.participants)*expected_output,min(expected_output,120))
+    transcript_tokens=base_tokens+4*len(data.participants)*expected_output
+    for index,jury in enumerate(data.juries,1):add_call(f"Blind jury {index}",jury.provider,jury.model,transcript_tokens)
+    if data.benchmark:
+        participant=data.participants[0];add_call("Single-model baseline",participant.provider,participant.model,base_tokens)
+    estimated=round(sum(item["estimated_cost_usd"] for item in calls),6);maximum=round(sum(item["maximum_cost_usd"] for item in calls),6)
+    return {"estimated_cost_usd":estimated,"maximum_cost_usd":maximum,"request_count":len(data.participants)*4+len(data.juries)+int(data.auto_stop_on_convergence)+int(data.benchmark),"priced_request_count":len(calls),"unknown_pricing":unknown,"assumptions":{"expected_output_tokens_per_call":expected_output,"maximum_output_tokens_per_call":maximum_output,"evidence_characters":len(evidence)},"warning":estimated>=settings.cost_warning_usd}
+
+
 @app.post("/api/debate/{run_id}/appeal")
 async def appeal_debate(run_id: int,data: DebateAppealInput):
     ensure_budget_available();run=store.run_detail(run_id)
@@ -796,14 +830,17 @@ async def save_document(file: UploadFile = File(...)):
 
 @app.post("/api/web-sources", status_code=201)
 async def save_web_source(data: WebSourceInput):
+    if data.analyze_visuals and (urlparse(data.url.strip()).hostname or "").lower() in YOUTUBE_HOSTS:ensure_budget_available()
     try:
-        source = await extract_web_source(data.url.strip())
+        settings=runtime_settings()
+        source = await extract_web_source(data.url.strip(),data.analyze_visuals,settings.openai_api_key,settings.video_vision_model)
     except (SourceImportError, httpx.HTTPError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     provenance = f"Source type: {source['source_type']}\nSource URL: {source['url']}\nCaptured by My AI Team as untrusted external evidence.\n\n"
     filename = f"{source['title'][:160]} ({source['source_type']})"
     document = store.add_document(filename, provenance + source["text"])
     document.update({"source_url":source["url"],"source_type":source["source_type"],"title":source["title"]})
+    if source.get("usage"):record_result_usage(source["usage"])
     document["index"] = platform.index_document(document["id"],current_project_id())
     try:
         settings=runtime_settings();document["embedding"]=await platform.embed_document(document["id"],settings.openai_api_key if settings.enable_embeddings else None,settings.embedding_model)

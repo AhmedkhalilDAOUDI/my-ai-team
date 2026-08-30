@@ -23,7 +23,7 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 - Adversarial, decision, and Socratic formats; live moderator pause/intervention; chronological and side-by-side views.
 - Aggregated jury scoring for reasoning, evidence, responsiveness, and consistency, plus agreement, common ground, disagreements, unresolved questions, and a verdict.
 - Open, cite-facts, and sources-only evidence policies; a structured claim ledger; citation-label and cited-turn coverage audits; and an optional single-model baseline benchmark.
-- External-source importing for readable webpages and YouTube captions. Imported sources are saved, indexed, automatically selected, and cited like uploaded documents.
+- External-source importing for readable webpages and multimodal YouTube analysis. Videos combine captions with sampled visual scenes, actions, diagrams, and on-screen text before becoming cited debate evidence.
 - Reusable debate templates, blind convergence checks, jury appeals, live checkpoints, and reproducibility metadata.
 - Saved, replayable, exportable debates with evidence attachments and a conservative pre-run cost estimate.
 - Visual workflow builder with create, rename, reorder, remove, and execution-mode controls.
@@ -34,6 +34,7 @@ Add at least one provider API key to `.env`, then open <http://127.0.0.1:8000>. 
 - Reusable PDF, DOCX, TXT, Markdown, CSV, and JSON documents with bounded shared-context injection.
 - Markdown, PDF, and JSON exports for saved runs.
 - Model-aware cost estimates, provider-reported token accounting, configurable warnings, and a daily budget.
+- A live preflight total beside **Begin debate**, recalculated from the selected models, jury count, benchmark, convergence check, question, and attached evidence; it shows both an expected total and a maximum-token ceiling.
 - Automatic retries with exponential backoff for rate limits and temporary provider failures.
 - Run status, errors, usage, cancellation state, and exportable results.
 - Optional single-owner access-token protection for network deployments.
@@ -91,7 +92,7 @@ Every uploaded document is chunked, indexed, and given stable citations such as 
 
 The debate citation audit checks whether cited `D#C#` labels exist in the supplied evidence and measures citation coverage across turns. It does not independently prove that a source entails a model's claim; the claim ledger and jury review are decision support, not a factual guarantee.
 
-Paste a public article or YouTube URL into **Debate a website or video** on the Debate page. Webpages must expose readable HTML or plain text; YouTube videos must have accessible manual or automatic captions. Private-network URLs are blocked, imported text is treated as untrusted evidence, and videos without captions should be supplied as transcript files instead.
+Paste a public article or YouTube URL into **Debate a website or full video** on the Debate page. With visual analysis enabled, the app downloads a bounded low-resolution copy, samples up to 12 chronological frames, and uses `VIDEO_VISION_MODEL` to describe directly visible actions, diagrams, scene changes, and on-screen text; this adds one separately billed OpenAI API call. Webpages must expose readable HTML or plain text, YouTube videos must have accessible manual or automatic captions, private-network URLs are blocked, and all imported material is treated as untrusted evidence. Frame sampling does not inspect every instant of a video, so increase the source scrutiny through the debate and jury rather than treating the visual summary as a perfect record.
 
 Set `NEO4J_URI`, `NEO4J_USERNAME`, and `NEO4J_PASSWORD` to enable graph synchronization. n8n can queue a workflow through `POST /api/webhooks/n8n/workflows/{workflow_id}` and monitor it through `GET /api/jobs`. Jobs survive application restarts.
 
