@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 import zipfile
+import httpx
 from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
@@ -21,6 +22,7 @@ from .storage import CURRENT_PROJECT_ID, Store, current_project_id
 from .usage import approximate_tokens, calculate_cost
 from .platform import PlatformStore, terms
 from .builder import BuilderError, BuilderWorkspace
+from .web_sources import SourceImportError, extract_web_source
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -237,6 +239,10 @@ class DebateControlInput(BaseModel):
 
 class DebateAppealInput(BaseModel):
     reason: str = Field(min_length=3, max_length=5000)
+
+
+class WebSourceInput(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
 
 
 class ChatRequest(BaseModel):
@@ -785,6 +791,23 @@ async def save_document(file: UploadFile = File(...)):
     try:
         settings=runtime_settings(); document["embedding"] = await platform.embed_document(document["id"], settings.openai_api_key if settings.enable_embeddings else None, settings.embedding_model)
     except Exception as exc: document["embedding"] = {"embedded":0,"mode":"keyword","warning":str(exc)}
+    return document
+
+
+@app.post("/api/web-sources", status_code=201)
+async def save_web_source(data: WebSourceInput):
+    try:
+        source = await extract_web_source(data.url.strip())
+    except (SourceImportError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    provenance = f"Source type: {source['source_type']}\nSource URL: {source['url']}\nCaptured by My AI Team as untrusted external evidence.\n\n"
+    filename = f"{source['title'][:160]} ({source['source_type']})"
+    document = store.add_document(filename, provenance + source["text"])
+    document.update({"source_url":source["url"],"source_type":source["source_type"],"title":source["title"]})
+    document["index"] = platform.index_document(document["id"],current_project_id())
+    try:
+        settings=runtime_settings();document["embedding"]=await platform.embed_document(document["id"],settings.openai_api_key if settings.enable_embeddings else None,settings.embedding_model)
+    except Exception as exc:document["embedding"]={"embedded":0,"mode":"keyword","warning":str(exc)}
     return document
 
 

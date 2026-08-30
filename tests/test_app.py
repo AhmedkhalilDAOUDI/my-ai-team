@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from app.main import app, store
 from app.config import Settings
 from app.orchestrator import ProviderResult, ThesisTeam
+from app.web_sources import SourceImportError, _ReadableHTML, _validate_public_url
 
 client=TestClient(app)
 
@@ -43,6 +44,29 @@ def test_discussion_and_live_chat_context(monkeypatch):
 def test_upload():
     r=client.post("/api/upload",files={"file":("notes.txt",b"evidence","text/plain")})
     assert r.status_code==200 and r.json()["text"]=="evidence"
+
+def test_web_source_import_is_saved_indexed_and_selected_by_ui(monkeypatch):
+    from app import main
+    async def fake_source(url):
+        return {'title':'Example video','url':'https://www.youtube.com/watch?v=test','source_type':'youtube','text':'Transcript evidence about GraphRAG tradeoffs. '*8}
+    monkeypatch.setattr(main,'extract_web_source',fake_source)
+    response=client.post('/api/web-sources',json={'url':'https://www.youtube.com/watch?v=test'})
+    assert response.status_code==201
+    source=response.json()
+    try:
+        assert source['source_type']=='youtube' and source['index']['chunks']>=1
+        assert any(item['id']==source['id'] for item in client.get('/api/documents').json())
+        page=client.get('/').text
+        script=client.get('/static/discussion.js').text
+        assert 'Debate a website or video' in page and '/api/web-sources' in script and "sources_only" in script
+    finally:client.delete(f"/api/documents/{source['id']}")
+
+def test_web_source_security_and_html_extraction():
+    with pytest.raises(SourceImportError):_validate_public_url('http://127.0.0.1/private')
+    with pytest.raises(SourceImportError):_validate_public_url('file:///etc/passwd')
+    parser=_ReadableHTML();parser.feed('<html><title>Useful article</title><script>ignore me</script><article><h1>Claim</h1><p>Readable evidence.</p></article></html>')
+    title,text=parser.result()
+    assert title=='Useful article' and 'Readable evidence' in text and 'ignore me' not in text
 
 def test_studio_persistence_and_default_workflow():
     agents=client.get("/api/agents").json()
